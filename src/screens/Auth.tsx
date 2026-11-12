@@ -101,6 +101,7 @@ function OtpStep({
   email,
   sending,
   sendError,
+  cooldownUntil,
   onChangeEmail,
   onVerified,
   onVerify,
@@ -109,6 +110,7 @@ function OtpStep({
   email: string;
   sending: boolean;
   sendError: string | null;
+  cooldownUntil: number;
   onChangeEmail: () => void;
   onVerified: () => void;
   onVerify: (value: string) => Promise<boolean>;
@@ -117,23 +119,21 @@ function OtpStep({
   const [otp, setOtp] = useState<string[]>(Array(6).fill(""));
   const [error, setError] = useState(false);
   const [verified, setVerified] = useState(false);
-  const [seconds, setSeconds] = useState(60);
-  const [resendTick, setResendTick] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
   const refs = useRef<(HTMLInputElement | null)[]>([]);
   const controls = useAnimation();
   const busy = useRef(false);
+
+  const seconds = Math.max(0, Math.ceil((cooldownUntil - now) / 1000));
 
   useEffect(() => {
     refs.current[0]?.focus();
   }, []);
 
   useEffect(() => {
-    setSeconds(60);
-    const timer = window.setInterval(() => {
-      setSeconds((value) => Math.max(0, value - 1));
-    }, 1000);
+    const timer = window.setInterval(() => setNow(Date.now()), 500);
     return () => window.clearInterval(timer);
-  }, [resendTick]);
+  }, []);
 
   const verify = async (value: string) => {
     if (busy.current || verified) return;
@@ -263,25 +263,24 @@ function OtpStep({
               >
                 <Check size={14} /> Код принят
               </motion.p>
+            ) : sendError ? (
+              <motion.p
+                key="send-error"
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                className="t-sub text-center text-danger/80"
+              >
+                {sendError}
+              </motion.p>
             ) : null}
           </AnimatePresence>
         </div>
 
-        <div className="mt-4 rounded-[16px] border border-foreground/8 bg-foreground/[0.02] py-3 text-center">
-          {sending ? (
-            <p className="t-sub text-muted-foreground">Отправляем код…</p>
-          ) : sendError ? (
-            <>
-              <p className="t-cap text-danger">Ошибка отправки</p>
-              <p className="t-sub mt-1 text-muted-foreground">{sendError}</p>
-            </>
-          ) : (
-            <p className="t-sub text-muted-foreground">Код отправлен на почту</p>
-          )}
-        </div>
-
         <div className="mt-4 text-center">
-          {seconds > 0 ? (
+          {sending ? (
+            <p className="t-sub text-faint">Отправляем код…</p>
+          ) : seconds > 0 ? (
             <p className="t-sub text-faint">
               Повторно через{" "}
               <span className="t-num text-muted-foreground">0:{String(seconds).padStart(2, "0")}</span>
@@ -289,9 +288,7 @@ function OtpStep({
           ) : (
             <button
               type="button"
-              disabled={sending}
               onClick={() => {
-                setResendTick((tick) => tick + 1);
                 setOtp(Array(6).fill(""));
                 refs.current[0]?.focus();
                 void onResend();
@@ -456,6 +453,10 @@ export function AuthFlow() {
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
+  const [cooldownUntil, setCooldownUntil] = useState(0);
+  const sendingRef = useRef(false);
+  const lastSentEmailRef = useRef("");
+  const COOLDOWN_MS = 60_000;
 
   useEffect(() => {
     setOnboarded();
@@ -486,6 +487,10 @@ export function AuthFlow() {
 
   // Подтверждение идёт через Supabase Auth (email OTP).
   const sendCode = async () => {
+    if (sendingRef.current) return;
+    if (lastSentEmailRef.current === address && cooldownUntil > Date.now()) return;
+    sendingRef.current = true;
+    lastSentEmailRef.current = address;
     setSending(true);
     setSendError(null);
     try {
@@ -494,14 +499,19 @@ export function AuthFlow() {
         options: { shouldCreateUser: true, emailRedirectTo: window.location.origin },
       });
       if (error) throw error;
+      setCooldownUntil(Date.now() + COOLDOWN_MS);
     } catch (error) {
+      const status = (error as { status?: number } | null)?.status;
       const message = error instanceof Error ? error.message : "";
+      const rateLimited = status === 429 || /rate|limit|429|too many/i.test(message);
+      // Supabase ограничивает частоту писем. Не показываем красную плашку —
+      // просто выдерживаем паузу, после которой можно запросить код снова.
+      setCooldownUntil(Date.now() + (rateLimited ? COOLDOWN_MS : 15_000));
       setSendError(
-        /rate|limit|429/i.test(message)
-          ? "Слишком много попыток. Подождите минуту и попробуйте снова."
-          : "Не удалось отправить код. Проверьте адрес и попробуйте снова.",
+        rateLimited ? null : "Не удалось отправить код. Попробуйте ещё раз.",
       );
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   };
@@ -559,6 +569,7 @@ export function AuthFlow() {
               email={address}
               sending={sending}
               sendError={sendError}
+              cooldownUntil={cooldownUntil}
               onChangeEmail={() => {
                 setStep("email");
                 setSendError(null);
