@@ -1,0 +1,599 @@
+import { AnimatePresence, motion, useAnimation } from "motion/react";
+import { ArrowLeft, Camera, Check } from "lucide-react";
+import { useEffect, useRef, useState, type ClipboardEvent, type ChangeEvent } from "react";
+import { Avatar } from "../components/Avatar";
+import { ContactGlobe } from "../components/Globe";
+import { Button, IconButton, Sheet } from "../components/ui";
+import { playTone } from "../lib/feedback";
+import { fileToAvatar } from "../lib/image";
+import { useStore } from "../lib/store";
+import { supabase } from "../lib/supabase";
+import { cn, haptic } from "../lib/utils";
+
+const EASE = [0.16, 1, 0.3, 1] as const;
+
+export function normalizeEmail(value: string) {
+  return value.trim().toLowerCase();
+}
+
+export function isValidEmail(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value.trim());
+}
+
+function EmailStep({
+  email,
+  onEmail,
+  onContinue,
+}: {
+  email: string;
+  onEmail: (value: string) => void;
+  onContinue: () => void;
+}) {
+  const valid = isValidEmail(email);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  useEffect(() => {
+    if (valid) setConfirmOpen(true);
+  }, [valid]);
+
+  return (
+    <div className="flex h-full flex-col px-6">
+      <div className="flex flex-1 flex-col justify-center pb-10 pt-[32vh]">
+        <div className="mb-1.5">
+          <p className="t-cap text-faint">Добро пожаловать</p>
+          <h1 className="t-title mt-1">Ваш Gmail</h1>
+        </div>
+
+        <div>
+          <label className="t-cap block text-faint" htmlFor="email">
+            Электронная почта
+          </label>
+
+          <div className="mt-2 flex h-[56px] items-center overflow-hidden rounded-[14px] border border-foreground/10 bg-foreground/[0.05] transition-colors focus-within:border-foreground/30">
+            <input
+              id="email"
+              type="email"
+              inputMode="email"
+              autoComplete="email"
+              autoFocus
+              value={email}
+              onChange={(event) => onEmail(event.target.value.slice(0, 120))}
+              placeholder="you@gmail.com"
+              className="h-full min-w-0 flex-1 bg-transparent px-4 text-[16px] tracking-[0.01em] outline-none"
+            />
+          </div>
+        </div>
+
+        <div className="mt-10">
+          <ContactGlobe className="mx-auto max-w-[260px]" />
+        </div>
+      </div>
+
+      <Sheet open={confirmOpen} onClose={() => setConfirmOpen(false)} title="Проверьте почту">
+        <p className="t-body mt-2 break-all text-muted-foreground">{email.trim()}</p>
+        <div className="mt-6 flex gap-2 pb-4">
+          <Button
+            variant="secondary"
+            className="flex-1"
+            onClick={() => {
+              setConfirmOpen(false);
+              onEmail("");
+            }}
+          >
+            Изменить
+          </Button>
+          <Button
+            className="flex-1"
+            onClick={() => {
+              setConfirmOpen(false);
+              onContinue();
+            }}
+          >
+            Всё верно
+          </Button>
+        </div>
+      </Sheet>
+    </div>
+  );
+}
+
+function OtpStep({
+  email,
+  sending,
+  sendError,
+  onChangeEmail,
+  onVerified,
+  onVerify,
+  onResend,
+}: {
+  email: string;
+  sending: boolean;
+  sendError: string | null;
+  onChangeEmail: () => void;
+  onVerified: () => void;
+  onVerify: (value: string) => Promise<boolean>;
+  onResend: () => Promise<void>;
+}) {
+  const [otp, setOtp] = useState<string[]>(Array(6).fill(""));
+  const [error, setError] = useState(false);
+  const [verified, setVerified] = useState(false);
+  const [seconds, setSeconds] = useState(60);
+  const [resendTick, setResendTick] = useState(0);
+  const refs = useRef<(HTMLInputElement | null)[]>([]);
+  const controls = useAnimation();
+  const busy = useRef(false);
+
+  useEffect(() => {
+    refs.current[0]?.focus();
+  }, []);
+
+  useEffect(() => {
+    setSeconds(60);
+    const timer = window.setInterval(() => {
+      setSeconds((value) => Math.max(0, value - 1));
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [resendTick]);
+
+  const verify = async (value: string) => {
+    if (busy.current || verified) return;
+    busy.current = true;
+    const ok = await onVerify(value);
+    if (ok) {
+      setVerified(true);
+      setError(false);
+      playTone("success");
+      haptic([12, 34, 24]);
+      window.setTimeout(onVerified, 620);
+    } else {
+      busy.current = false;
+      setError(true);
+      playTone("error");
+      haptic([20, 40, 20]);
+      void controls.start({ x: [0, -7, 7, -5, 5, 0], transition: { duration: 0.38 } });
+      window.setTimeout(() => {
+        setOtp(Array(6).fill(""));
+        setError(false);
+        refs.current[0]?.focus();
+      }, 520);
+    }
+  };
+
+  useEffect(() => {
+    const joined = otp.join("");
+    if (joined.length === 6) {
+      const timer = window.setTimeout(() => verify(joined), 90);
+      return () => window.clearTimeout(timer);
+    }
+  }, [otp]);
+
+  const setDigit = (index: number, value: string) => {
+    const digit = value.replace(/\D/g, "").slice(-1);
+    setOtp((current) => {
+      const next = [...current];
+      next[index] = digit;
+      return next;
+    });
+    if (digit && index < 5) refs.current[index + 1]?.focus();
+  };
+
+  const onKeyDown = (index: number, event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === "Backspace" && !otp[index] && index > 0) {
+      refs.current[index - 1]?.focus();
+    }
+    if (event.key === "ArrowLeft" && index > 0) refs.current[index - 1]?.focus();
+    if (event.key === "ArrowRight" && index < 5) refs.current[index + 1]?.focus();
+  };
+
+  const onPaste = (event: ClipboardEvent<HTMLDivElement>) => {
+    const text = event.clipboardData.getData("text").replace(/\D/g, "").slice(0, 6);
+    if (!text) return;
+    event.preventDefault();
+    const next = text.split("");
+    while (next.length < 6) next.push("");
+    setOtp(next);
+    refs.current[Math.min(text.length, 5)]?.focus();
+  };
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="px-6 pt-4">
+        <IconButton label="Назад" onClick={onChangeEmail} className="-ml-2">
+          <ArrowLeft size={19} />
+        </IconButton>
+      </div>
+
+      <div className="no-scrollbar flex min-h-0 flex-1 flex-col justify-center px-6 pb-12 pt-[10vh]">
+        <div className="mb-8">
+          <h1 className="t-title">Введите код</h1>
+          <p className="t-body mt-2 break-all text-muted-foreground">
+            Отправили на <span className="text-foreground">{email}</span>
+          </p>
+        </div>
+
+        <motion.div
+          animate={controls}
+          onPaste={onPaste}
+          className="flex items-center justify-between gap-2"
+        >
+          {otp.map((digit, index) => (
+            <input
+              key={index}
+              ref={(node) => {
+                refs.current[index] = node;
+              }}
+              value={digit}
+              onChange={(event) => setDigit(index, event.target.value)}
+              onKeyDown={(event) => onKeyDown(index, event)}
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              maxLength={1}
+              aria-label={`Цифра ${index + 1}`}
+              disabled={verified}
+              className={cn(
+                "t-num h-[62px] w-full min-w-0 rounded-[16px] border text-center text-[24px] font-medium outline-none transition-all duration-200",
+                digit
+                  ? "border-foreground/35 bg-foreground/[0.08] text-foreground"
+                  : "border-foreground/10 bg-foreground/[0.04] text-foreground",
+                error && "border-danger/60 bg-danger/[0.06]",
+                verified && "border-foreground bg-foreground text-background",
+              )}
+            />
+          ))}
+        </motion.div>
+
+        <div className="mt-4 flex min-h-6 items-center justify-center">
+          <AnimatePresence mode="wait">
+            {error ? (
+              <motion.p
+                key="error"
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                className="t-sub text-danger"
+              >
+                Неверный код
+              </motion.p>
+            ) : verified ? (
+              <motion.p
+                key="ok"
+                initial={{ opacity: 0, y: 4 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="t-sub flex items-center gap-1.5 text-foreground"
+              >
+                <Check size={14} /> Код принят
+              </motion.p>
+            ) : null}
+          </AnimatePresence>
+        </div>
+
+        <div className="mt-4 rounded-[16px] border border-foreground/8 bg-foreground/[0.02] py-3 text-center">
+          {sending ? (
+            <p className="t-sub text-muted-foreground">Отправляем код…</p>
+          ) : sendError ? (
+            <>
+              <p className="t-cap text-danger">Ошибка отправки</p>
+              <p className="t-sub mt-1 text-muted-foreground">{sendError}</p>
+            </>
+          ) : (
+            <p className="t-sub text-muted-foreground">Код отправлен на почту</p>
+          )}
+        </div>
+
+        <div className="mt-4 text-center">
+          {seconds > 0 ? (
+            <p className="t-sub text-faint">
+              Повторно через{" "}
+              <span className="t-num text-muted-foreground">0:{String(seconds).padStart(2, "0")}</span>
+            </p>
+          ) : (
+            <button
+              type="button"
+              disabled={sending}
+              onClick={() => {
+                setResendTick((tick) => tick + 1);
+                setOtp(Array(6).fill(""));
+                refs.current[0]?.focus();
+                void onResend();
+              }}
+              className="press t-sub rounded-full px-4 py-1.5 font-medium text-foreground underline decoration-foreground/25 underline-offset-4 disabled:opacity-40"
+            >
+              Отправить ещё раз
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SignupStep({
+  email,
+  onBack,
+  onDone,
+}: {
+  email: string;
+  onBack: () => void;
+  onDone: (profile: {
+    name: string;
+    username: string;
+    bio: string;
+    avatar: string | null;
+  }) => void;
+}) {
+  const [name, setName] = useState("");
+  const [username, setUsername] = useState("");
+  const [bio, setBio] = useState("");
+  const [avatar, setAvatar] = useState<string | null>(null);
+  const [touchedUsername, setTouchedUsername] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!touchedUsername) {
+      setUsername(
+        name
+          .toLowerCase()
+          .replace(/[^a-z0-9_]/g, "_")
+          .replace(/^_+|_+$/g, "")
+          .slice(0, 24)
+      );
+    }
+  }, [name, touchedUsername]);
+
+  const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      const result = await fileToAvatar(file);
+      setAvatar(result);
+      playTone("tap");
+    } catch {
+      /* ignore */
+    }
+    event.target.value = "";
+  };
+
+  const valid = name.trim().length >= 2;
+
+  return (
+    <div className="flex h-full flex-col">
+      <div className="px-6 pt-4">
+        <IconButton label="Назад" onClick={onBack} className="-ml-2">
+          <ArrowLeft size={19} />
+        </IconButton>
+      </div>
+
+      <div className="no-scrollbar flex min-h-0 flex-1 flex-col justify-center px-6 pb-12">
+        <div className="mb-6">
+          <h1 className="t-title">Профиль</h1>
+          <p className="t-sub mt-2 break-all text-faint">{email}</p>
+        </div>
+
+        <div className="mb-6 flex items-center gap-4">
+          <button
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            className="relative rounded-full"
+            aria-label="Добавить аватар"
+          >
+            <Avatar name={name || "Zero"} src={avatar} size={72} gradient />
+            <span className="absolute -bottom-1 -right-1 grid size-7 place-items-center rounded-full border-2 border-background bg-primary text-primary-foreground shadow-md">
+              <Camera size={12} />
+            </span>
+          </button>
+          <div>
+            <p className="t-h">Аватар</p>
+            <p className="t-sub mt-1 max-w-[190px] text-faint">По желанию. Можно добавить позже.</p>
+          </div>
+          <input ref={fileRef} type="file" accept="image/*" onChange={handleFile} className="hidden" />
+        </div>
+
+        <div className="space-y-5">
+          <div>
+            <label htmlFor="name" className="t-cap block text-faint">
+              Имя
+            </label>
+            <input
+              id="name"
+              value={name}
+              onChange={(event) => setName(event.target.value)}
+              placeholder="Как вас зовут?"
+              autoComplete="name"
+              maxLength={40}
+              className="field mt-2"
+            />
+          </div>
+          <div>
+            <label htmlFor="username" className="t-cap block text-faint">
+              Имя пользователя
+            </label>
+            <div className="mt-2 flex h-[52px] items-center rounded-[14px] border border-foreground/10 bg-foreground/[0.05] px-4 focus-within:border-foreground/30">
+              <span className="text-[15px] text-faint">@</span>
+              <input
+                id="username"
+                value={username}
+                onChange={(event) => {
+                  setTouchedUsername(true);
+                  setUsername(
+                    event.target.value.toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 24),
+                  );
+                }}
+                placeholder="username"
+                className="h-full flex-1 bg-transparent pl-1 text-[15px] tracking-[0.01em] outline-none"
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="px-6 pb-[max(22px,env(safe-area-inset-bottom,0px))] pt-3">
+        <Button
+          className="w-full"
+          disabled={!valid || loading}
+          onClick={() => {
+            if (!valid) return;
+            setLoading(true);
+            haptic(8);
+            onDone({
+              name: name.trim(),
+              username: username.trim() || "user",
+              bio,
+              avatar,
+            });
+          }}
+        >
+          Начать
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+export function AuthFlow() {
+  const { setOnboarded, loginExisting, completeSignup } = useStore();
+  const [step, setStep] = useState<"email" | "otp" | "signup">("email");
+  const [email, setEmail] = useState("");
+  const [sending, setSending] = useState(false);
+  const [sendError, setSendError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setOnboarded();
+  }, [setOnboarded]);
+
+  // Поддержка magic link: если Supabase вернул сессию по ссылке из письма,
+  // входим по email без ручного ввода кода.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const hasAuthCallback =
+          window.location.hash.includes("access_token") ||
+          window.location.search.includes("code=");
+        if (!hasAuthCallback) return;
+        const { data } = await supabase.auth.getSession();
+        const sessionEmail = data.session?.user?.email;
+        if (!sessionEmail) return;
+        const next = normalizeEmail(sessionEmail);
+        setEmail(next);
+        if (!loginExisting(next)) setStep("signup");
+      } catch {
+        /* нет сессии — обычный вход по коду */
+      }
+    })();
+  }, [loginExisting]);
+
+  const address = normalizeEmail(email);
+
+  // Подтверждение идёт через Supabase Auth (email OTP).
+  const sendCode = async () => {
+    setSending(true);
+    setSendError(null);
+    try {
+      const { error } = await supabase.auth.signInWithOtp({
+        email: address,
+        options: { shouldCreateUser: true, emailRedirectTo: window.location.origin },
+      });
+      if (error) throw error;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      setSendError(
+        /rate|limit|429/i.test(message)
+          ? "Слишком много попыток. Подождите минуту и попробуйте снова."
+          : "Не удалось отправить код. Проверьте адрес и попробуйте снова.",
+      );
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const startOtp = () => {
+    if (!isValidEmail(address)) return;
+    setStep("otp");
+    playTone("send");
+    haptic(8);
+    void sendCode();
+  };
+
+  const verifyCode = async (value: string) => {
+    try {
+      const { error } = await supabase.auth.verifyOtp({
+        email: address,
+        token: value,
+        type: "email",
+      });
+      return !error;
+    } catch {
+      return false;
+    }
+  };
+
+  const finishOtp = () => {
+    const existing = loginExisting(address);
+    if (!existing) setStep("signup");
+  };
+
+  return (
+    <div className="relative flex h-full flex-col overflow-hidden bg-background">
+      <AnimatePresence mode="wait" initial={false}>
+        {step === "email" ? (
+          <motion.div
+            key="email"
+            initial={{ opacity: 0, x: -18 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -24 }}
+            transition={{ duration: 0.3, ease: EASE }}
+            className="h-full"
+          >
+            <EmailStep email={email} onEmail={setEmail} onContinue={startOtp} />
+          </motion.div>
+        ) : step === "otp" ? (
+          <motion.div
+            key="otp"
+            initial={{ opacity: 0, x: 28 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 28 }}
+            transition={{ duration: 0.3, ease: EASE }}
+            className="h-full"
+          >
+            <OtpStep
+              email={address}
+              sending={sending}
+              sendError={sendError}
+              onChangeEmail={() => {
+                setStep("email");
+                setSendError(null);
+              }}
+              onVerified={finishOtp}
+              onVerify={verifyCode}
+              onResend={sendCode}
+            />
+          </motion.div>
+        ) : (
+          <motion.div
+            key="signup"
+            initial={{ opacity: 0, x: 28 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: 28 }}
+            transition={{ duration: 0.3, ease: EASE }}
+            className="h-full"
+          >
+            <SignupStep
+              email={address}
+              onBack={() => setStep("email")}
+              onDone={({ name, username, bio, avatar }) => {
+                completeSignup({
+                  email: address,
+                  name,
+                  username,
+                  avatar,
+                  bio,
+                });
+                playTone("success");
+              }}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}

@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 320" width="320" height="320" role="img" aria-label="Профиль">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0%" stop-color="#3a3a3a"/>
+      <stop offset="52%" stop-color="#1d1d1d"/>
+      <stop offset="100%" stop-color="#0c0c0c"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="50%" cy="36%" r="46%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.30"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="skin" x1="0.2" y1="0" x2="0.9" y2="1">
+      <stop offset="0%" stop-color="#a5a5a5"/>
+      <stop offset="46%" stop-color="#737373"/>
+      <stop offset="100%" stop-color="#3b3b3b"/>
+    </linearGradient>
+    <linearGradient id="body" x1="0.1" y1="0" x2="0.9" y2="1">
+      <stop offset="0%" stop-color="#4c4c4c"/>
+      <stop offset="60%" stop-color="#262626"/>
+      <stop offset="100%" stop-color="#121212"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.65"/>
+      <stop offset="60%" stop-color="#ffffff" stop-opacity="0.05"/>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="soft" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="12"/>
+    </filter>
+    <filter id="grain">
+      <feTurbulence type="fractalNoise" baseFrequency="0.92" numOctaves="3" stitchTiles="stitch"/>
+      <feColorMatrix type="saturate" values="0"/>
+    </filter>
+    <clipPath id="frame">
+      <rect width="320" height="320" rx="160"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#frame)">
+    <rect width="320" height="320" fill="url(#bg)"/>
+    <ellipse cx="160" cy="118" rx="132" ry="116" fill="url(#halo)"/>
+
+    <g opacity="0.5" filter="url(#soft)">
+      <ellipse cx="160" cy="292" rx="132" ry="70" fill="#000000"/>
+    </g>
+
+    <path d="M40 320c6-74 48-116 120-116s114 42 120 116Z" fill="url(#body)"/>
+    <path d="M40 320c6-74 48-116 120-116 14 0 27 1 39 4-52 8-84 48-89 112Z" fill="url(#rim)" opacity="0.35"/>
+
+    <path d="M112 156c0-40 20-66 48-66s48 26 48 66v22c0 38-21 66-48 66s-48-28-48-66Z" fill="url(#skin)"/>
+    <path d="M112 164c0-8 1-16 2-22 5 35 23 57 46 66-27 4-48-15-48-44Z" fill="#000000" opacity="0.16"/>
+
+    <path d="M108 120c4-32 24-52 52-52s48 20 52 52c2 14-6 23-16 15-12-9-23-13-36-13s-24 4-36 13c-10 8-18-1-16-15Z" fill="#202020"/>
+    <path d="M120 106c10-16 25-25 40-25 14 0 27 7 37 20-13-7-25-10-38-10-14 0-27 5-39 15Z" fill="#6b6b6b" opacity="0.45"/>
+
+    <ellipse cx="140" cy="160" rx="5.5" ry="3" fill="#181818"/>
+    <ellipse cx="180" cy="160" rx="5.5" ry="3" fill="#181818"/>
+    <path d="M151 184c6 4 12 4 18 0" stroke="#2b2b2b" stroke-width="3" stroke-linecap="round" fill="none"/>
+    <path d="M156 170c2-3 6-3 8 0" stroke="#4a4a4a" stroke-width="2.4" stroke-linecap="round" fill="none"/>
+
+    <path d="M113 150c-8-1-13 6-11 15 1 8 6 13 13 12Z" fill="#565656"/>
+    <path d="M207 150c8-1 13 6 11 15-1 8-6 13-13 12Z" fill="#3f3f3f"/>
+
+    <rect width="320" height="320" filter="url(#grain)" opacity="0.10" style="mix-blend-mode:overlay"/>
+    <rect width="320" height="320" fill="url(#halo)" opacity="0.22"/>
+  </g>
+</svg>

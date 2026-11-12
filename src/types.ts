@@ -1,0 +1,170 @@
+export type ThemeMode = "dark" | "light" | "system";
+export type Visibility = "all" | "contacts" | "nobody";
+
+export interface Settings {
+  theme: ThemeMode;
+  notifications: boolean;
+  push: boolean;
+  sound: boolean;
+  vibration: boolean;
+  readReceipts: boolean;
+  lastSeen: Visibility;
+  profilePhoto: Visibility;
+  phoneNumber: Visibility;
+  twoFactor: boolean;
+  reducedMotion: boolean;
+  compact: boolean;
+}
+
+export interface User {
+  id: string;
+  name: string;
+  username: string;
+  email: string;
+  phone?: string;
+  dial?: string;
+  verified?: boolean;
+  bio: string;
+  status: string;
+  avatar: string | null;
+  createdAt: number;
+}
+
+export type MessageKind =
+  | "text"
+  | "sticker"
+  | "voice"
+  | "videoNote"
+  | "photo"
+  | "file"
+  | "location"
+  | "poll";
+
+export type MessageStatus = "sending" | "sent" | "read";
+
+export interface Reaction {
+  emoji: string;
+  count: number;
+  mine?: boolean;
+}
+
+export interface PollOption {
+  id: string;
+  text: string;
+  votes: number;
+  voted?: boolean;
+}
+
+export interface Poll {
+  question: string;
+  options: PollOption[];
+}
+
+export interface MessageVoice {
+  duration: number;
+  waveform: number[];
+  src?: string;
+}
+
+export interface MessageVideoNote {
+  duration: number;
+  seed: number;
+  src?: string;
+}
+
+export interface MessagePhoto {
+  seed?: number;
+  src?: string;
+  wide?: boolean;
+  caption?: string;
+}
+
+export interface MessageFile {
+  name: string;
+  size: number;
+  ext: string;
+}
+
+export interface MessageLocation {
+  title: string;
+  subtitle?: string;
+  seed: number;
+}
+
+export interface Message {
+  id: string;
+  chatId: string;
+  fromMe: boolean;
+  at: number;
+  kind: MessageKind;
+  status?: MessageStatus;
+  text?: string;
+  sticker?: string;
+  voice?: MessageVoice;
+  videoNote?: MessageVideoNote;
+  photo?: MessagePhoto;
+  file?: MessageFile;
+  location?: MessageLocation;
+  poll?: Poll;
+  replyTo?: string;
+  forwardedFrom?: string;
+  pinned?: boolean;
+  fresh?: boolean;
+  edited?: boolean;
+  sender?: string;
+  reactions?: Reaction[];
+}
+
+export interface ChatGroup {
+  members?: number;
+}
+
+export interface Chat {
+  id: string;
+  name: string;
+  username?: string;
+  phone?: string;
+  email?: string;
+  verified?: boolean;
+  unread: number;
+  messages: Message[];
+  avatar?: string | null;
+  online?: boolean;
+  lastSeen?: number;
+  typing?: boolean;
+  draft?: string;
+  pinnedChat?: boolean;
+  muted?: boolean;
+  group?: ChatGroup;
+  autoReply?: string[];
+}
+
+export interface CallRecord {
+  id: string;
+  chatId: string;
+  name: string;
+  direction: "in" | "out" | "missed";
+  video: boolean;
+  duration: number;
+  at: number;
+}
+
+export interface AppState {
+  version: number;
+  onboarded: boolean;
+  user: User | null;
+  accounts: Record<string, User>;
+  chats: Chat[];
+  calls: CallRecord[];
+  settings: Settings;
+}
+
+export interface ToastData {
+  id: string;
+  chatId: string;
+  name: string;
+  avatar?: string | null;
+  text: string;
+  kind: MessageKind;
+  at: number;
+}
