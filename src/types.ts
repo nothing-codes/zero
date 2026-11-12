@@ -144,7 +144,6 @@ export interface CallRecord {
   chatId: string;
   name: string;
   direction: "in" | "out" | "missed";
-  video: boolean;
   duration: number;
   at: number;
 }

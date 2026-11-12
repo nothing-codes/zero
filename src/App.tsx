@@ -16,7 +16,7 @@ import { ProfileScreen } from "./screens/ProfileScreen";
 import { SettingsScreen } from "./screens/SettingsScreen";
 
 type Overlay = { type: "chat"; chatId: string } | { type: "profile" } | null;
-type ActiveCall = { chatId: string; video: boolean; incoming?: IncomingCall } | null;
+type ActiveCall = { chatId: string; incoming?: IncomingCall } | null;
 
 const TABS: Tab[] = ["chats", "contacts", "calls", "settings"];
 
@@ -74,7 +74,6 @@ export function App() {
         haptic([12, 40, 12]);
         setCall({
           chatId,
-          video: false,
           incoming: {
             chatId,
             from: signal.from || signal.handle,
@@ -140,10 +139,10 @@ export function App() {
                 <ChatsScreen onOpenChat={openChat} />
               ) : null}
               {item === "contacts" ? (
-                <ContactsScreen onOpenChat={openChat} onCall={(chatId, video) => setCall({ chatId, video })} />
+                <ContactsScreen onOpenChat={openChat} onCall={(chatId) => setCall({ chatId })} />
               ) : null}
               {item === "calls" ? (
-                <CallsScreen onCall={(chatId, video) => setCall({ chatId, video })} />
+                <CallsScreen onCall={(chatId) => setCall({ chatId })} />
               ) : null}
               {item === "settings" ? (
                 <SettingsScreen onOpenProfile={() => setOverlay({ type: "profile" })} />
@@ -171,7 +170,7 @@ export function App() {
               <ChatScreen
                 chatId={overlay.chatId}
                 onBack={() => setOverlay(null)}
-                onCall={(video) => setCall({ chatId: overlay.chatId, video })}
+                onCall={() => setCall({ chatId: overlay.chatId })}
               />
             ) : (
               <ProfileScreen
@@ -189,9 +188,8 @@ export function App() {
       <AnimatePresence>
         {call ? (
           <CallOverlay
-            key={`${call.chatId}-${call.video}`}
+            key={call.chatId}
             chatId={call.chatId}
-            video={call.video}
             incoming={call.incoming}
             onClose={() => setCall(null)}
           />

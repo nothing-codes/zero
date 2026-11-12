@@ -10,7 +10,7 @@ const FILTERS = [
   { id: "missed", label: "Пропущенные" },
 ] as const;
 
-export function CallsScreen({ onCall }: { onCall: (chatId: string, video: boolean) => void }) {
+export function CallsScreen({ onCall }: { onCall: (chatId: string) => void }) {
   const { state, openOrCreateChat } = useAuthedStore();
   const [filter, setFilter] = useState<"all" | "missed">("all");
   const [dialOpen, setDialOpen] = useState(false);
@@ -27,7 +27,7 @@ export function CallsScreen({ onCall }: { onCall: (chatId: string, video: boolea
       chatId && state.chats.some((chat) => chat.id === chatId)
         ? chatId
         : openOrCreateChat({ name });
-    onCall(id, false);
+    onCall(id);
   };
 
   const dial = () => {
@@ -37,7 +37,7 @@ export function CallsScreen({ onCall }: { onCall: (chatId: string, video: boolea
     const id = existing?.id ?? openOrCreateChat({ name: `@${username}`, username, online: true });
     setDialOpen(false);
     setHandle("");
-    onCall(id, false);
+    onCall(id);
   };
 
   return (

@@ -15,6 +15,18 @@ function extensionFor(blob: Blob, kind: "voice" | "videoNote") {
   return "webm";
 }
 
+/**
+ * Safari/iOS не умеет проигрывать webm, поэтому сначала пробуем mp4.
+ * Chrome, наоборот, не пишет mp4 — там сработает webm/opus.
+ */
+export function pickRecorderMime(kind: "voice" | "videoNote"): string | undefined {
+  if (typeof MediaRecorder === "undefined" || typeof MediaRecorder.isTypeSupported !== "function") return undefined;
+  const candidates = kind === "voice"
+    ? ["audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"]
+    : ["video/mp4", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
+  return candidates.find((type) => MediaRecorder.isTypeSupported(type));
+}
+
 export async function uploadMedia(blob: Blob, kind: "voice" | "videoNote"): Promise<string> {
   const ext = extensionFor(blob, kind);
   const path = `${kind}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;

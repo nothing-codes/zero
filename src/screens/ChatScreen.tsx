@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import {
-  ArrowDown, ArrowLeft, BadgeCheck, Ban, BarChart3, Camera, Check, CheckCheck, ChevronDown, ChevronUp, Clock3, Copy, Eraser, File as FileIcon, Forward, Image as ImageIcon, Mail, MapPin, Mic, MoreVertical, Paperclip, Pause, Phone, Pin, Play, Plus, Reply, Search, Send, Trash2, Video, X,
+  ArrowDown, ArrowLeft, BadgeCheck, Ban, BarChart3, Camera, Check, CheckCheck, ChevronDown, Clock3, Copy, Eraser, File as FileIcon, Forward, Image as ImageIcon, Mail, MapPin, Mic, MoreVertical, Paperclip, Pause, Phone, Pin, Play, Plus, Reply, Search, Send, Trash2, Video, X,
 } from "lucide-react";
 import {
   useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject,
@@ -10,7 +10,7 @@ import { ContactPicker } from "../components/ContactPicker";
 import { MapArt, PhotoArt } from "../components/media";
 import { Button, ContextMenu, IconButton, Sheet, SettingsRow } from "../components/ui";
 import { fileToPhoto } from "../lib/image";
-import { uploadMedia } from "../lib/media";
+import { pickRecorderMime, uploadMedia } from "../lib/media";
 import { useAuthedStore } from "../lib/store";
 import type { Chat, Message, MessageStatus, PollOption } from "../types";
 import { cn, duration as fmtDuration, haptic, lastSeenLabel, makeWave, plural, timeOf, uid } from "../lib/utils";
@@ -57,6 +57,7 @@ function VoiceBubble({ message, mine }: { message: Message; mine: boolean }) {
   const [progress, setProgress] = useState(0);
   const [elapsed, setElapsed] = useState(0);
   const [duration, setDuration] = useState(voice.duration);
+  const [failed, setFailed] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   useEffect(() => {
@@ -85,8 +86,17 @@ function VoiceBubble({ message, mine }: { message: Message; mine: boolean }) {
       return;
     }
     if (hasSrc && audioRef.current) {
-      audioRef.current.currentTime = progress * (audioRef.current.duration || duration);
-      void audioRef.current.play().catch(() => setPlaying(false));
+      const element = audioRef.current;
+      // До загрузки метаданных duration = NaN — не трогаем currentTime,
+      // иначе Safari может выбросить исключение и не начать воспроизведение.
+      if (progress > 0 && Number.isFinite(element.duration) && element.duration > 0) {
+        element.currentTime = progress * element.duration;
+      }
+      setFailed(false);
+      void element.play().catch(() => {
+        setPlaying(false);
+        setFailed(true);
+      });
       setPlaying(true);
     } else {
       setPlaying(true);
@@ -98,7 +108,9 @@ function VoiceBubble({ message, mine }: { message: Message; mine: boolean }) {
     const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
     setProgress(ratio);
     setElapsed(ratio * duration);
-    if (audioRef.current) audioRef.current.currentTime = ratio * (audioRef.current.duration || duration);
+    if (audioRef.current && Number.isFinite(audioRef.current.duration) && audioRef.current.duration > 0) {
+      audioRef.current.currentTime = ratio * audioRef.current.duration;
+    }
   };
 
   const shown = playing ? elapsed : duration;
@@ -113,12 +125,15 @@ function VoiceBubble({ message, mine }: { message: Message; mine: boolean }) {
           <span key={index} data-played={index / voice.waveform.length < progress} className="wave-bar w-[2px]" style={{ height: `${Math.max(12, height * 100)}%` }} />
         ))}
       </div>
-      <span className="t-time w-8 shrink-0 text-right opacity-60">{fmtDuration(shown)}</span>
+      <span className={cn("t-time w-8 shrink-0 text-right", failed ? "text-danger" : "opacity-60")}>
+        {failed ? "!" : fmtDuration(shown)}
+      </span>
       {hasSrc ? (
         <audio
           ref={audioRef}
           src={voice.src}
-          preload="metadata"
+          preload="auto"
+          playsInline
           hidden
           onLoadedMetadata={(event) => {
             const value = event.currentTarget.duration;
@@ -131,9 +146,112 @@ function VoiceBubble({ message, mine }: { message: Message; mine: boolean }) {
               setProgress(element.currentTime / element.duration);
             }
           }}
+          onError={() => { setPlaying(false); setFailed(true); }}
           onEnded={() => { setPlaying(false); setProgress(0); setElapsed(0); }}
         />
       ) : null}
+    </div>
+  );
+}
+
+const NOTE_SIZE = 194;
+
+function VideoNoteBubble({ message, mine }: { message: Message; mine: boolean }) {
+  const note = message.videoNote!;
+  const hasSrc = Boolean(note.src);
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [failed, setFailed] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const radius = NOTE_SIZE / 2 - 3;
+  const circumference = 2 * Math.PI * radius;
+
+  // Старые кружки без файла просто проигрывают индикатор по таймеру.
+  useEffect(() => {
+    if (!playing || hasSrc) return;
+    const timer = window.setInterval(() => {
+      setProgress((current) => {
+        const next = current + 0.1 / Math.max(1, note.duration);
+        if (next >= 1) { setPlaying(false); return 0; }
+        return next;
+      });
+    }, 100);
+    return () => window.clearInterval(timer);
+  }, [playing, hasSrc, note.duration]);
+
+  const toggle = () => {
+    haptic(4);
+    if (!hasSrc || !videoRef.current) {
+      setPlaying((value) => !value);
+      return;
+    }
+    const element = videoRef.current;
+    if (playing) {
+      element.pause();
+      setPlaying(false);
+      return;
+    }
+    setFailed(false);
+    void element.play().catch(() => {
+      setPlaying(false);
+      setFailed(true);
+    });
+    setPlaying(true);
+  };
+
+  return (
+    <div className="relative" style={{ width: NOTE_SIZE, height: NOTE_SIZE }}>
+      <button
+        type="button"
+        onClick={toggle}
+        aria-label={playing ? "Пауза" : "Воспроизвести кружок"}
+        className={cn("absolute inset-[3px] overflow-hidden rounded-full border bg-card/70 transition-transform active:scale-[0.98]", mine ? "border-primary-foreground/20" : "border-foreground/15")}
+      >
+        {hasSrc ? (
+          <video
+            ref={videoRef}
+            src={note.src}
+            playsInline
+            preload="auto"
+            className="size-full object-cover grayscale"
+            onTimeUpdate={(event) => {
+              const element = event.currentTarget;
+              if (Number.isFinite(element.duration) && element.duration > 0) setProgress(element.currentTime / element.duration);
+            }}
+            onError={() => { setPlaying(false); setFailed(true); }}
+            onEnded={() => { setPlaying(false); setProgress(0); }}
+          />
+        ) : (
+          <PhotoArt seed={note.seed} className="size-full" />
+        )}
+        {!playing || failed ? (
+          <span className="absolute inset-0 grid place-items-center bg-background/25 backdrop-blur-[1px]">
+            {failed
+              ? <span className="t-time text-danger">!</span>
+              : <span className={cn("grid size-11 place-items-center rounded-full", mine ? "bg-primary-foreground/15" : "bg-foreground/10")}><Play size={18} className="ml-0.5" fill="currentColor" /></span>}
+          </span>
+        ) : null}
+      </button>
+
+      <svg viewBox={`0 0 ${NOTE_SIZE} ${NOTE_SIZE}`} className={cn("pointer-events-none absolute inset-0 size-full -rotate-90", mine ? "text-primary-foreground" : "text-foreground")}>
+        <circle cx={NOTE_SIZE / 2} cy={NOTE_SIZE / 2} r={radius} fill="none" stroke="currentColor" strokeWidth="2.5" opacity="0.16" />
+        <circle
+          cx={NOTE_SIZE / 2}
+          cy={NOTE_SIZE / 2}
+          r={radius}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={circumference * (1 - progress)}
+          className="opacity-70"
+        />
+      </svg>
+
+      <span className={cn("t-time t-num absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full px-2 py-0.5 backdrop-blur", mine ? "bg-primary/50 text-primary-foreground" : "bg-background/55 text-foreground/80")}>
+        {playing ? fmtDuration(Math.max(0, note.duration * progress)) : fmtDuration(note.duration)}
+      </span>
     </div>
   );
 }
@@ -199,6 +317,18 @@ function MessageBubble({
   const bubbleTone = mine ? "bg-primary text-primary-foreground" : "bg-bubble-in text-foreground";
 
   const content = (() => {
+    if (message.kind === "voice") return (
+      <div className={cn("min-w-[248px] max-w-[294px] px-2.5 py-2", bubbleRadius, bubbleTone)}>
+        <VoiceBubble message={message} mine={mine} />
+        <Meta message={message} mine={mine} />
+      </div>
+    );
+    if (message.kind === "videoNote") return (
+      <div className="flex flex-col items-end">
+        <VideoNoteBubble message={message} mine={mine} />
+        <Meta message={message} mine={mine} />
+      </div>
+    );
     if (message.kind === "photo") return (
       <div className={cn("max-w-[286px] overflow-hidden p-1.5", bubbleRadius, bubbleTone)}>
         <div className="block w-full overflow-hidden rounded-[14px]">{message.photo?.src ? <img src={message.photo.src} alt="" draggable={false} className="max-h-[340px] w-full object-cover" /> : <PhotoArt seed={message.photo?.seed ?? 1} wide={message.photo?.wide} className="aspect-[4/5] w-full" />}</div>
@@ -253,7 +383,7 @@ function ReplyQuote({ message, mine, onScrollTo }: { message: Message; mine: boo
   );
 }
 
-function RecordingOverlay({ kind, elapsed, cancelled, videoRef, hasStream, levels, onSend, onCancel }: { kind: "voice" | "videoNote"; elapsed: number; cancelled: boolean; videoRef: RefObject<HTMLVideoElement | null>; hasStream: boolean; levels: number[]; onSend: () => void; onCancel: () => void }) {
+function RecordingOverlay({ kind, elapsed, cancelled, videoRef, hasStream, levels }: { kind: "voice" | "videoNote"; elapsed: number; cancelled: boolean; videoRef: RefObject<HTMLVideoElement | null>; hasStream: boolean; levels: number[] }) {
   const progress = Math.min(1, elapsed / 60);
   const box = kind === "videoNote" ? 232 : 212;
   const radius = box / 2 - 3;
@@ -261,11 +391,20 @@ function RecordingOverlay({ kind, elapsed, cancelled, videoRef, hasStream, level
   const bars = Array.from({ length: 64 }, (_, index) => levels[Math.floor((index * levels.length) / 64)] ?? 0);
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[75] overflow-hidden bg-background/40 backdrop-blur-3xl">
+    <motion.div initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.98 }} transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }} className="fixed inset-0 z-[75] overflow-hidden bg-background/40 backdrop-blur-3xl">
       <div className="pointer-events-none absolute inset-x-0 top-[max(28px,calc(env(safe-area-inset-top,0px)+22px))] flex flex-col items-center gap-2 text-center">
-        <p className="text-[10px] font-medium uppercase tracking-[0.22em] text-foreground/35">
-          {cancelled ? "Запись будет отменена" : kind === "voice" ? "Голосовое сообщение" : "Видеокружок"}
-        </p>
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.p
+            key={cancelled ? "cancel" : kind}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -8 }}
+            transition={{ duration: 0.2 }}
+            className={cn("text-[10px] font-medium uppercase tracking-[0.22em]", cancelled ? "text-danger/70" : "text-foreground/35")}
+          >
+            {cancelled ? "Запись будет отменена" : kind === "voice" ? "Голосовое сообщение" : "Видеокружок"}
+          </motion.p>
+        </AnimatePresence>
         {kind === "voice" ? (
           <p className="t-num text-[15px] font-medium tabular-nums text-foreground/70">{fmtDuration(elapsed)}</p>
         ) : null}
@@ -273,7 +412,13 @@ function RecordingOverlay({ kind, elapsed, cancelled, videoRef, hasStream, level
 
       {kind === "videoNote" ? (
         <div className="absolute inset-0 grid place-items-center">
-          <div className="relative" style={{ width: box, height: box }}>
+          <motion.div
+            initial={{ scale: 0.72, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            transition={{ type: "spring", stiffness: 260, damping: 22 }}
+            className="relative"
+            style={{ width: box, height: box }}
+          >
             <div className="absolute inset-[9px] overflow-hidden rounded-full border border-foreground/15 bg-card/70">
               <video ref={videoRef} autoPlay muted playsInline className="size-full object-cover grayscale" />
               {!hasStream ? <div className="absolute inset-0 grid place-items-center"><Camera size={26} className="text-foreground/30" /></div> : null}
@@ -294,13 +439,13 @@ function RecordingOverlay({ kind, elapsed, cancelled, videoRef, hasStream, level
                 opacity="0.9"
               />
             </svg>
-          </div>
+          </motion.div>
         </div>
       ) : null}
 
       {kind === "voice" ? (
         <div
-          className="pointer-events-none absolute inset-x-0 bottom-0 flex h-[34vh] items-end gap-[2px] px-2 pb-[max(112px,calc(env(safe-area-inset-bottom,0px)+112px))]"
+          className="pointer-events-none absolute inset-x-0 bottom-0 flex h-[34vh] items-end gap-[2px] px-2 pb-[max(10px,calc(env(safe-area-inset-bottom,0px)+6px))]"
           style={{
             maskImage: "linear-gradient(to top, #000 12%, transparent 100%)",
             WebkitMaskImage: "linear-gradient(to top, #000 12%, transparent 100%)",
@@ -316,27 +461,11 @@ function RecordingOverlay({ kind, elapsed, cancelled, videoRef, hasStream, level
         </div>
       ) : null}
 
-      <div className="absolute inset-x-0 bottom-0 z-10 flex items-center justify-center gap-2.5 px-6 pb-[max(22px,env(safe-area-inset-bottom,0px))]">
-        <button
-          type="button"
-          onClick={onCancel}
-          className="press flex h-12 items-center justify-center gap-2 rounded-full border border-foreground/12 bg-card/80 px-5 text-[14px] font-medium text-foreground/80 backdrop-blur-xl"
-        >
-          <X size={16} /> Отмена
-        </button>
-        <button
-          type="button"
-          onClick={onSend}
-          className="press flex h-12 items-center justify-center gap-2 rounded-full bg-primary px-6 text-[14px] font-semibold text-primary-foreground shadow-lg"
-        >
-          <Send size={16} /> Отправить
-        </button>
-      </div>
     </motion.div>
   );
 }
 
-function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; onCall: (video: boolean) => void; }) {
+function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; onCall: () => void; }) {
   const { sendMessage, setMessageMediaSource, deleteMessage, pinMessage, votePoll, forwardMessage, setDraft, markRead, setActiveChat, openOrCreateChat, clearMessages } = useAuthedStore();
   const messages = chat.messages;
   const [text, setText] = useState(chat.draft ?? "");
@@ -364,6 +493,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   const [recording, setRecording] = useState<{ kind: "voice" | "videoNote"; startedAt: number } | null>(null);
   const [recElapsed, setRecElapsed] = useState(0);
   const [recCancelled, setRecCancelled] = useState(false);
+  const [recMode, setRecMode] = useState<"voice" | "videoNote">("voice");
   const [hasStream, setHasStream] = useState(false);
   const [levels, setLevels] = useState<number[]>([]);
 
@@ -379,6 +509,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   const noticeTimer = useRef<number | null>(null);
   const recRef = useRef<{ kind: "voice" | "videoNote"; startedAt: number } | null>(null);
   const recCancel = useRef(false);
+  const holdRef = useRef<{ pointerId: number; startX: number; startY: number; at: number; started: boolean; timer: number | null } | null>(null);
   const mediaRef = useRef<{ stream: MediaStream; recorder: MediaRecorder; chunks: Blob[]; startedAt: number } | null>(null);
   const levelsRef = useRef<number[]>([]);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -421,7 +552,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   }, [messages, scrollToBottom]);
   useEffect(() => { if (!searchOpen || matches.length === 0) return; const target = matches[Math.min(searchIndex, matches.length - 1)]; if (!target) return; document.getElementById(`msg-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }); }, [searchIndex, matches, searchOpen]);
   useEffect(() => { if (!searchOpen) return; setSearchIndex(0); }, [searchQuery, searchOpen]);
-  useEffect(() => { return () => { if (noticeTimer.current) window.clearTimeout(noticeTimer.current); mediaRef.current?.stream.getTracks().forEach((t) => t.stop()); if (audioCtxRef.current) void audioCtxRef.current.close().catch(() => undefined); }; }, []);
+  useEffect(() => { return () => { if (noticeTimer.current) window.clearTimeout(noticeTimer.current); if (holdRef.current?.timer) window.clearTimeout(holdRef.current.timer); mediaRef.current?.stream.getTracks().forEach((t) => t.stop()); if (audioCtxRef.current) void audioCtxRef.current.close().catch(() => undefined); }; }, []);
 
   const scrollToMessage = useCallback((id: string) => { document.getElementById(`msg-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }); setFlashId(id); window.setTimeout(() => setFlashId(null), 1600); }, []);
   
@@ -470,6 +601,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
 
     const cleanup = () => {
       recRef.current = null;
+      holdRef.current = null;
       setRecording(null);
       setRecCancelled(false);
       setHasStream(false);
@@ -517,6 +649,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
       }
 
       const fallbackType = session.kind === "voice" ? "audio/webm" : "video/webm";
+      // Итоговый тип берём у рекордера (mp4 на Safari, webm в Chrome).
       const blob = new Blob(media.chunks, { type: media.recorder.mimeType || fallbackType });
       if (blob.size === 0) {
         notify("Не удалось записать");
@@ -580,8 +713,8 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
         notify("Камера недоступна — запишем только звук");
       }
 
-      if (!recRef.current) { stream.getTracks().forEach((t) => t.stop()); return; }
-      const mime = kind === "voice" ? (MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : undefined) : (MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus") ? "video/webm;codecs=vp9,opus" : MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus") ? "video/webm;codecs=vp8,opus" : "video/webm");
+      if (recRef.current !== session) { stream.getTracks().forEach((t) => t.stop()); return; }
+      const mime = pickRecorderMime(kind);
       const recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
       const chunks: Blob[] = []; recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
       recorder.start(250);
@@ -606,8 +739,10 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
         }
       }
     } catch (error) {
+      if (recRef.current !== session) return;
       mediaRef.current = null;
       recRef.current = null;
+      holdRef.current = null;
       setRecording(null);
       setRecCancelled(false);
       setHasStream(false);
@@ -619,6 +754,71 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
       );
     }
   }, [notify]);
+
+  // Telegram-механика: удерживаем кнопку — пишем, отпускаем — отправляем.
+  // Короткое нажатие переключает режим (голос ↔ видео), свайп влево отменяет.
+  const HOLD_DELAY = 180;
+
+  const startHoldRecording = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (recRef.current || holdRef.current) return;
+    event.preventDefault();
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* noop */ }
+    const kind = recMode;
+    const hold = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      at: Date.now(),
+      started: false,
+      timer: null as number | null,
+    };
+    hold.timer = window.setTimeout(() => {
+      if (holdRef.current !== hold) return;
+      hold.started = true;
+      void beginRecording(kind);
+    }, HOLD_DELAY);
+    holdRef.current = hold;
+  };
+
+  const moveHoldRecording = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    const hold = holdRef.current;
+    if (!hold || !hold.started) return;
+    const dx = event.clientX - hold.startX;
+    const dy = event.clientY - hold.startY;
+    if (dx < -72 && Math.abs(dy) < 90) {
+      if (hold.timer) window.clearTimeout(hold.timer);
+      holdRef.current = null;
+      recCancel.current = true;
+      setRecCancelled(true);
+      finishRecording();
+      notify("Запись отменена");
+    }
+  };
+
+  const endHoldRecording = (event?: ReactPointerEvent<HTMLButtonElement>) => {
+    const hold = holdRef.current;
+    if (!hold) return;
+    holdRef.current = null;
+    if (hold.timer) window.clearTimeout(hold.timer);
+    if (event) {
+      try { event.currentTarget.releasePointerCapture(hold.pointerId); } catch { /* noop */ }
+    }
+
+    // Не успели начать запись — значит это было обычное нажатие: меняем режим.
+    if (!hold.started) {
+      haptic(5);
+      setRecMode((mode) => (mode === "voice" ? "videoNote" : "voice"));
+      return;
+    }
+
+    const tooShort = Date.now() - hold.at < 500;
+    if (tooShort) {
+      recCancel.current = true;
+      setRecCancelled(true);
+    }
+    finishRecording();
+    if (tooShort) notify("Удерживайте кнопку, чтобы записать");
+  };
 
   useEffect(() => {
     if (!recording) return;
@@ -690,7 +890,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
             </span>
           </button>
           <IconButton label="Поиск" onClick={() => setSearchOpen(true)} className="size-8"><Search size={17} /></IconButton>
-          <IconButton label="Аудиозвонок" onClick={() => onCall(false)} className="size-8"><Phone size={17} /></IconButton>
+          <IconButton label="Аудиозвонок" onClick={() => onCall()} className="size-8"><Phone size={17} /></IconButton>
           <IconButton label="Ещё" onClick={() => setMenuOpen(true)} className="size-8"><MoreVertical size={17} /></IconButton>
         </div>
 
@@ -777,25 +977,34 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
           {text.trim() ? (
             <motion.button type="button" initial={{ scale: 0.7, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} whileTap={{ scale: 0.9 }} onClick={handleSendText} className="mb-0.5 grid size-[42px] shrink-0 place-items-center rounded-full bg-primary text-primary-foreground"><Send size={17} /></motion.button>
           ) : (
-            <div className="mb-0.5 flex shrink-0 items-center gap-0.5">
-              <button
+            <div className="mb-0.5 flex shrink-0 items-center">
+              <motion.button
                 type="button"
-                aria-label="Голосовое сообщение"
-                disabled={Boolean(recording)}
-                onClick={() => { void beginRecording("voice"); }}
-                className="grid size-[42px] place-items-center rounded-full text-foreground/80 transition-colors hover:bg-foreground/6 active:bg-foreground/10 disabled:opacity-40"
+                aria-label={recMode === "voice"
+                  ? "Голосовое сообщение: удерживайте, чтобы записать. Нажмите, чтобы переключить на видео"
+                  : "Видеосообщение: удерживайте, чтобы записать. Нажмите, чтобы переключить на голос"}
+                title={recMode === "voice" ? "Удерживайте — голосовое, нажмите — видео" : "Удерживайте — видеосообщение, нажмите — голос"}
+                whileTap={{ scale: 0.86 }}
+                onPointerDown={startHoldRecording}
+                onPointerMove={moveHoldRecording}
+                onPointerUp={endHoldRecording}
+                onPointerCancel={endHoldRecording}
+                onContextMenu={(event) => event.preventDefault()}
+                className="grid size-[42px] touch-none select-none place-items-center rounded-full text-foreground/80 transition-colors hover:bg-foreground/6 active:bg-foreground/10"
               >
-                <Mic size={21} />
-              </button>
-              <button
-                type="button"
-                aria-label="Видеокружок"
-                disabled={Boolean(recording)}
-                onClick={() => { void beginRecording("videoNote"); }}
-                className="grid size-[42px] place-items-center rounded-full text-foreground/70 transition-colors hover:bg-foreground/6 active:bg-foreground/10 disabled:opacity-40"
-              >
-                <Video size={19} />
-              </button>
+                <AnimatePresence mode="wait" initial={false}>
+                  <motion.span
+                    key={recMode}
+                    initial={{ opacity: 0, scale: 0.55, rotate: -35 }}
+                    animate={{ opacity: 1, scale: 1, rotate: 0 }}
+                    exit={{ opacity: 0, scale: 0.55, rotate: 35 }}
+                    transition={{ duration: 0.14 }}
+                    className="grid place-items-center"
+                  >
+                    {recMode === "voice" ? <Mic size={21} /> : <Video size={20} />}
+                  </motion.span>
+                </AnimatePresence>
+              </motion.button>
             </div>
           )}
         </div>
@@ -810,8 +1019,6 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
             videoRef={videoPreviewRef}
             hasStream={hasStream}
             levels={levels}
-            onSend={() => finishRecording()}
-            onCancel={() => { recCancel.current = true; setRecCancelled(true); finishRecording(); }}
           />
         ) : null}
       </AnimatePresence>
@@ -883,7 +1090,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
         </div>
 
         <div className="mt-4 flex gap-2 pb-2">
-          <Button variant="secondary" className="flex flex-1 items-center justify-center gap-2" onClick={() => { setProfileOpen(false); onCall(false); }}><Phone size={15} /> Звонок</Button>
+          <Button variant="secondary" className="flex flex-1 items-center justify-center gap-2" onClick={() => { setProfileOpen(false); onCall(); }}><Phone size={15} /> Звонок</Button>
           <Button className="flex flex-1 items-center justify-center gap-2" onClick={() => { setProfileOpen(false); window.setTimeout(() => textRef.current?.focus(), 180); }}>Написать</Button>
         </div>
       </Sheet>
@@ -940,7 +1147,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   );
 }
 
-export function ChatScreen({ chatId, onBack, onCall }: { chatId: string; onBack: () => void; onCall: (video: boolean) => void; }) {
+export function ChatScreen({ chatId, onBack, onCall }: { chatId: string; onBack: () => void; onCall: () => void; }) {
   const { state } = useAuthedStore();
   const chat = state.chats.find((item) => item.id === chatId);
 

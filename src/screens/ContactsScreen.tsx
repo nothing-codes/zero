@@ -6,7 +6,7 @@ import { haptic } from "../lib/utils";
 
 export function ContactsScreen(_: {
   onOpenChat?: (chatId: string) => void;
-  onCall?: (chatId: string, video: boolean) => void;
+  onCall?: (chatId: string) => void;
 }) {
   const [copied, setCopied] = useState(false);
 

@@ -32,7 +32,6 @@ export function CallOverlay({
   onClose,
 }: {
   chatId: string;
-  video?: boolean;
   incoming?: IncomingCall;
   onClose: () => void;
 }) {
@@ -76,7 +75,7 @@ export function CallOverlay({
     pcRef.current = null;
     localRef.current?.getTracks().forEach((track) => track.stop());
     localRef.current = null;
-    addCall({ chatId, name, direction, video: false, duration: secondsRef.current });
+    addCall({ chatId, name, direction, duration: secondsRef.current });
     onClose();
   };
   finishRef.current = finishCall;
