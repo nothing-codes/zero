@@ -1,8 +1,0 @@
-[{
-  "relation": ["delegate_permission/common.handle_all_urls"],
-  "target": {
-    "namespace": "android_app",
-    "package_name": "app.nothing.zero",
-    "sha256_cert_fingerprints": ["0A:46:CA:EF:8F:83:F7:98:0F:D3:24:3A:9B:9C:41:61:DC:C7:2C:35:00:56:96:A3:66:8C:04:38:6C:1D:EB:B7"]
-  }
-}]
