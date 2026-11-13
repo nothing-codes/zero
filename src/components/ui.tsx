@@ -12,6 +12,61 @@ import { cn } from "../lib/utils";
 import type { ToastData } from "../types";
 import { Avatar } from "./Avatar";
 
+/* ── Keyboard helpers ─────────────────────────────────────────────── */
+
+/**
+ * When a bottom sheet or a context menu opens over the composer, the mobile
+ * keyboard must go away — otherwise it covers the sheet. Blur on open.
+ */
+export function hideKeyboard() {
+  const active = document.activeElement as HTMLElement | null;
+  if (!active) return;
+  const tag = active.tagName.toLowerCase();
+  if (tag === "input" || tag === "textarea" || active.isContentEditable) {
+    active.blur();
+  }
+}
+
+function useHideKeyboard(open: boolean, container?: { current: HTMLElement | null }) {
+  useEffect(() => {
+    if (!open) return;
+    const run = () => {
+      const active = document.activeElement as HTMLElement | null;
+      // Если фокус уже внутри открытого окна (например, поиск в пикере),
+      // не закрываем клавиатуру — пользователь сам её вызвал.
+      if (active && container?.current?.contains(active)) return;
+      hideKeyboard();
+    };
+    run();
+    const timer = window.setTimeout(run, 140);
+    return () => window.clearTimeout(timer);
+  }, [open, container]);
+}
+
+/**
+ * На iOS клавиатура не уменьшает layout viewport, и `fixed inset-0` уходит
+ * под неё. Считаем окна по visualViewport, чтобы они оставались над
+ * клавиатурой.
+ */
+function useVisualViewportBox() {
+  const [box, setBox] = useState<{ top: number; height: number } | null>(null);
+
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const update = () => setBox({ top: vv.offsetTop, height: vv.height });
+    update();
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    return () => {
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+    };
+  }, []);
+
+  return box;
+}
+
 /* ── Button ───────────────────────────────────────────────────────── */
 
 type ButtonVariant = "primary" | "secondary" | "ghost" | "danger";
@@ -184,10 +239,18 @@ export function Sheet({
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
+  const panelRef = useRef<HTMLDivElement>(null);
+  useHideKeyboard(open, panelRef);
+  const viewport = useVisualViewportBox();
+
   const sheetContent = (
     <AnimatePresence>
       {open ? (
-        <div className="fixed inset-0 z-[100]">
+        <div
+          className="fixed inset-0 z-[100] select-none"
+          style={viewport ? { top: viewport.top, height: viewport.height } : undefined}
+          onContextMenu={(event) => event.preventDefault()}
+        >
           <motion.button
             type="button"
             aria-label="Закрыть"
@@ -199,6 +262,7 @@ export function Sheet({
             className="absolute inset-0 h-full w-full cursor-default bg-black/55 backdrop-blur-[3px]"
           />
           <motion.div
+            ref={panelRef}
             initial={{ y: "100%" }}
             animate={{ y: 0 }}
             exit={{ y: "100%" }}
@@ -212,7 +276,7 @@ export function Sheet({
             style={{ paddingBottom: "max(20px, env(safe-area-inset-bottom, 0px))" }}
             className={cn(
               "absolute inset-x-0 bottom-0 mx-auto w-full max-w-[520px] overflow-hidden rounded-t-[28px] border-t border-foreground/10 bg-card shadow-[0_-30px_80px_-20px_rgba(0,0,0,0.7)]",
-              full && "h-[88dvh]",
+              full && "h-[88%]",
               className,
             )}
           >
@@ -227,7 +291,7 @@ export function Sheet({
                 </IconButton>
               </div>
             ) : null}
-            <div className={cn("overflow-y-auto px-5", full && "h-[calc(88dvh-56px)]")}>
+            <div className={cn("overflow-y-auto px-5", full && "h-[calc(100%-56px)]")}>
               {children}
             </div>
           </motion.div>
@@ -265,6 +329,9 @@ export function ContextMenu({
   width?: number;
 }) {
   const [pos, setPos] = useState({ x, y });
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  useHideKeyboard(open, panelRef);
 
   useEffect(() => {
     if (!open) return;
@@ -280,7 +347,7 @@ export function ContextMenu({
   return createPortal(
     <AnimatePresence>
       {open ? (
-        <div className="fixed inset-0 z-[110]">
+        <div className="fixed inset-0 z-[110] select-none" onContextMenu={(event) => event.preventDefault()}>
           <motion.button
             type="button"
             aria-label="Закрыть меню"
@@ -292,6 +359,7 @@ export function ContextMenu({
             className="absolute inset-0 h-full w-full cursor-default bg-black/25 backdrop-blur-[2px]"
           />
           <motion.div
+            ref={panelRef}
             initial={{ opacity: 0, scale: 0.9 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.94 }}

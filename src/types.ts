@@ -113,6 +113,23 @@ export interface Message {
   edited?: boolean;
   sender?: string;
   reactions?: Reaction[];
+  /** Идентификатор сообщения в базе Zero (для дедупликации Realtime). */
+  remoteId?: string;
+}
+
+/** Данные сообщения без служебных полей — то, что уходит в Supabase. */
+export interface MessagePayload {
+  kind: MessageKind;
+  text?: string;
+  sticker?: string;
+  voice?: MessageVoice;
+  videoNote?: MessageVideoNote;
+  photo?: MessagePhoto;
+  file?: MessageFile;
+  location?: MessageLocation;
+  poll?: Poll;
+  replyTo?: string;
+  forwardedFrom?: string;
 }
 
 export interface ChatGroup {
@@ -136,7 +153,10 @@ export interface Chat {
   pinnedChat?: boolean;
   muted?: boolean;
   group?: ChatGroup;
-  autoReply?: string[];
+  /** Чат с реальным пользователем, сообщения хранятся в Supabase. */
+  remote?: boolean;
+  /** История из Supabase уже подгружена. */
+  historyLoaded?: boolean;
 }
 
 export interface CallRecord {

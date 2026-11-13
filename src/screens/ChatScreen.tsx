@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import {
-  ArrowDown, ArrowLeft, BadgeCheck, Ban, BarChart3, Camera, Check, CheckCheck, ChevronDown, Clock3, Copy, Eraser, File as FileIcon, Forward, Image as ImageIcon, Mail, MapPin, Mic, MoreVertical, Paperclip, Pause, Phone, Pin, Play, Plus, Reply, Search, Send, Trash2, Video, X,
+  ArrowDown, ArrowLeft, BadgeCheck, Ban, BarChart3, Camera, Check, CheckCheck, ChevronDown, Clock3, Copy, Eraser, File as FileIcon, Forward, Image as ImageIcon, Mail, Mic, MoreVertical, Paperclip, Pause, Phone, Pin, Play, Plus, Reply, Search, Send, Trash2, Video, X,
 } from "lucide-react";
 import {
   useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject,
@@ -213,7 +213,7 @@ function VideoNoteBubble({ message, mine }: { message: Message; mine: boolean })
             src={note.src}
             playsInline
             preload="auto"
-            className="size-full object-cover grayscale"
+            className="size-full object-cover"
             onTimeUpdate={(event) => {
               const element = event.currentTarget;
               if (Number.isFinite(element.duration) && element.duration > 0) setProgress(element.currentTime / element.duration);
@@ -420,7 +420,7 @@ function RecordingOverlay({ kind, elapsed, cancelled, videoRef, hasStream, level
             style={{ width: box, height: box }}
           >
             <div className="absolute inset-[9px] overflow-hidden rounded-full border border-foreground/15 bg-card/70">
-              <video ref={videoRef} autoPlay muted playsInline className="size-full object-cover grayscale" />
+              <video ref={videoRef} autoPlay muted playsInline className="size-full object-cover" />
               {!hasStream ? <div className="absolute inset-0 grid place-items-center"><Camera size={26} className="text-foreground/30" /></div> : null}
             </div>
 
@@ -466,7 +466,7 @@ function RecordingOverlay({ kind, elapsed, cancelled, videoRef, hasStream, level
 }
 
 function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; onCall: () => void; }) {
-  const { sendMessage, setMessageMediaSource, deleteMessage, pinMessage, votePoll, forwardMessage, setDraft, markRead, setActiveChat, openOrCreateChat, clearMessages } = useAuthedStore();
+  const { sendMessage, setMessageMediaSource, deleteMessage, pinMessage, votePoll, forwardMessage, setDraft, markRead, setActiveChat, openOrCreateChat, clearMessages, loadChatHistory } = useAuthedStore();
   const messages = chat.messages;
   const [text, setText] = useState(chat.draft ?? "");
   const [replyTo, setReplyTo] = useState<Message | null>(null);
@@ -509,7 +509,17 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   const noticeTimer = useRef<number | null>(null);
   const recRef = useRef<{ kind: "voice" | "videoNote"; startedAt: number } | null>(null);
   const recCancel = useRef(false);
-  const holdRef = useRef<{ pointerId: number; startX: number; startY: number; at: number; started: boolean; timer: number | null } | null>(null);
+  const recSilent = useRef(false);
+  const holdRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    at: number;
+    started: boolean;
+    timer: number | null;
+    cleanup: (() => void) | null;
+  } | null>(null);
+  const pendingRelease = useRef(false);
   const mediaRef = useRef<{ stream: MediaStream; recorder: MediaRecorder; chunks: Blob[]; startedAt: number } | null>(null);
   const levelsRef = useRef<number[]>([]);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -538,6 +548,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   }, []);
 
   useLayoutEffect(() => { const node = scrollRef.current; if (node) node.scrollTop = node.scrollHeight; }, [chat.id]);
+  useEffect(() => { if (!chat.remote) return; void loadChatHistory(chat.id); }, [chat.id, chat.remote, loadChatHistory]);
   useEffect(() => { setActiveChat(chat.id); markRead(chat.id); return () => setActiveChat(null); }, [chat.id, markRead, setActiveChat]);
   useEffect(() => { markRead(chat.id); }, [messages.length, chat.id, markRead]);
   useEffect(() => { const timer = window.setTimeout(() => setDraft(chat.id, text), 260); return () => window.clearTimeout(timer); }, [text, chat.id, setDraft]);
@@ -552,7 +563,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   }, [messages, scrollToBottom]);
   useEffect(() => { if (!searchOpen || matches.length === 0) return; const target = matches[Math.min(searchIndex, matches.length - 1)]; if (!target) return; document.getElementById(`msg-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }); }, [searchIndex, matches, searchOpen]);
   useEffect(() => { if (!searchOpen) return; setSearchIndex(0); }, [searchQuery, searchOpen]);
-  useEffect(() => { return () => { if (noticeTimer.current) window.clearTimeout(noticeTimer.current); if (holdRef.current?.timer) window.clearTimeout(holdRef.current.timer); mediaRef.current?.stream.getTracks().forEach((t) => t.stop()); if (audioCtxRef.current) void audioCtxRef.current.close().catch(() => undefined); }; }, []);
+  useEffect(() => { return () => { if (noticeTimer.current) window.clearTimeout(noticeTimer.current); if (holdRef.current?.timer) window.clearTimeout(holdRef.current.timer); holdRef.current?.cleanup?.(); mediaRef.current?.stream.getTracks().forEach((t) => t.stop()); if (audioCtxRef.current) void audioCtxRef.current.close().catch(() => undefined); }; }, []);
 
   const scrollToMessage = useCallback((id: string) => { document.getElementById(`msg-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }); setFlashId(id); window.setTimeout(() => setFlashId(null), 1600); }, []);
   
@@ -575,8 +586,15 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
 
   const handlePhoto = async (file: File) => {
     try {
-      const src = await fileToPhoto(file);
-      const image = await new Promise<HTMLImageElement>((resolve) => { const img = new Image(); img.onload = () => resolve(img); img.src = src; });
+      const dataSrc = await fileToPhoto(file);
+      const image = await new Promise<HTMLImageElement>((resolve) => { const img = new Image(); img.onload = () => resolve(img); img.src = dataSrc; });
+      // Для настоящего чата фото должно быть доступно собеседнику, поэтому
+      // загружаем его в Storage. Если бакета нет — остаётся data URL.
+      let src = dataSrc;
+      try {
+        const blob = await (await fetch(dataSrc)).blob();
+        src = await uploadMedia(blob, "photo");
+      } catch { /* офлайн или нет бакета */ }
       sendMessage(chat.id, { kind: "photo", photo: { seed: Math.floor(Math.random() * 900) + 1, src, wide: image.width > image.height * 1.2, caption: "" }, replyTo: replyTo?.id });
       setReplyTo(null); setAttachOpen(false); notify("Фотография отправлена"); window.setTimeout(() => scrollToBottom(), 50);
     } catch { notify("Не удалось открыть изображение"); }
@@ -588,7 +606,6 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     setReplyTo(null); setAttachOpen(false); notify("Файл отправлен"); window.setTimeout(() => scrollToBottom(), 50);
   };
 
-  const sendLocation = () => { sendMessage(chat.id, { kind: "location", location: { title: "Моё местоположение", subtitle: "Минск, Беларусь", seed: 12 }, replyTo: replyTo?.id }); setReplyTo(null); setAttachOpen(false); notify("Геопозиция отправлена"); window.setTimeout(() => scrollToBottom(), 50); };
   const sendPoll = () => { const q = pollQuestion.trim(); const o = pollOptions.map((v) => v.trim()).filter(Boolean); if (!q || o.length < 2) return; sendMessage(chat.id, { kind: "poll", poll: { question: q, options: o.map<PollOption>((t) => ({ id: uid("o"), text: t, votes: 0 })) }, replyTo: replyTo?.id }); setPollOpen(false); setPollQuestion(""); setPollOptions(["", ""]); setReplyTo(null); notify("Опрос создан"); window.setTimeout(() => scrollToBottom(), 50); };
   const copyMessage = async (m: Message) => { const v = m.text ?? previewOf(m); try { await navigator.clipboard.writeText(v); notify("Скопировано"); } catch { notify("Не удалось скопировать"); } };
 
@@ -601,6 +618,13 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
 
     const cleanup = () => {
       recRef.current = null;
+      // Снимаем глобальные слушатели отпускания: запись могли остановить не
+      // пальцем, а таймером или размонтированием экрана.
+      const hold = holdRef.current;
+      if (hold) {
+        if (hold.timer) window.clearTimeout(hold.timer);
+        hold.cleanup?.();
+      }
       holdRef.current = null;
       setRecording(null);
       setRecCancelled(false);
@@ -617,11 +641,16 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
 
     if (!media) {
       // Пользователь отпустил кнопку раньше, чем браузер выдал доступ к
-      // микрофону (или доступ запрещён) — ничего не отправляем.
+      // микрофону. Не обрываем запись: дождёмся потока и завершим её сразу
+      // после старта рекордера (иначе кнопка «срабатывает» мгновенно).
+      if (recRef.current) {
+        pendingRelease.current = true;
+        return;
+      }
       cleanup();
-      if (!cancelled) notify("Удерживайте кнопку, чтобы записать");
       return;
     }
+    pendingRelease.current = false;
 
     const elapsed = Math.max(1, Math.round((Date.now() - media.startedAt) / 1000));
     const captured = levelsRef.current.slice();
@@ -644,7 +673,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
       media.stream.getTracks().forEach((t) => t.stop());
 
       if (cancelled) {
-        notify("Запись отменена");
+        if (!recSilent.current) notify("Запись отменена");
         return;
       }
 
@@ -675,7 +704,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
       if (!messageId) return;
       void uploadMedia(blob, session.kind)
         .then((url) => setMessageMediaSource(chat.id, messageId, session.kind, url))
-        .catch(() => undefined);
+        .catch(() => notify("Не удалось загрузить медиа — собеседник его не получит"));
     };
 
     media.recorder.onstop = finalize;
@@ -689,7 +718,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
 
   const beginRecording = useCallback(async (kind: "voice" | "videoNote") => {
     if (recRef.current) return;
-    haptic(10); const session = { kind, startedAt: Date.now() }; recRef.current = session; recCancel.current = false; setRecCancelled(false); setRecElapsed(0); setRecording(session);
+    haptic(10); const session = { kind, startedAt: Date.now() }; recRef.current = session; recCancel.current = false; recSilent.current = false; setRecCancelled(false); setRecElapsed(0); setRecording(session);
     levelsRef.current = []; setLevels([]);
     try {
       if (typeof MediaRecorder === "undefined" || !navigator.mediaDevices?.getUserMedia) {
@@ -720,6 +749,15 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
       recorder.start(250);
       mediaRef.current = { stream, recorder, chunks, startedAt: Date.now() };
       setHasStream(true);
+
+      // Кнопку уже отпустили, пока браузер запрашивал доступ — сразу
+      // останавливаем и отправляем записанное (а не «мгновенный сброс»).
+      if (pendingRelease.current) {
+        pendingRelease.current = false;
+        finishRecording();
+        return;
+      }
+
       if (videoPreviewRef.current) {
         videoPreviewRef.current.srcObject = stream;
         void videoPreviewRef.current.play().catch(() => undefined);
@@ -740,8 +778,10 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
       }
     } catch (error) {
       if (recRef.current !== session) return;
+      pendingRelease.current = false;
       mediaRef.current = null;
       recRef.current = null;
+      holdRef.current?.cleanup?.();
       holdRef.current = null;
       setRecording(null);
       setRecCancelled(false);
@@ -753,25 +793,56 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
           : "Нет доступа к камере или микрофону",
       );
     }
-  }, [notify]);
+  }, [finishRecording, notify]);
 
   // Telegram-механика: удерживаем кнопку — пишем, отпускаем — отправляем.
   // Короткое нажатие переключает режим (голос ↔ видео), свайп влево отменяет.
   const HOLD_DELAY = 180;
 
+  // Жест прервал сам браузер (системный запрос доступа, переключение окна).
+  // Это не нажатие: режим не переключаем, но активную запись завершаем.
+  const cancelHold = () => {
+    const hold = holdRef.current;
+    if (!hold) return;
+    holdRef.current = null;
+    hold.cleanup?.();
+    if (hold.timer) window.clearTimeout(hold.timer);
+    if (hold.started) finishRecording();
+  };
+
   const startHoldRecording = (event: ReactPointerEvent<HTMLButtonElement>) => {
     if (recRef.current || holdRef.current) return;
     event.preventDefault();
-    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* noop */ }
+    const pointerId = event.pointerId;
+    try { event.currentTarget.setPointerCapture(pointerId); } catch { /* noop */ }
     const kind = recMode;
     const hold = {
-      pointerId: event.pointerId,
+      pointerId,
       startX: event.clientX,
       startY: event.clientY,
       at: Date.now(),
       started: false,
       timer: null as number | null,
+      cleanup: null as (() => void) | null,
     };
+
+    // Отпускание ловим и на window: когда поверх появляется оверлей записи
+    // или системный запрос доступа, pointerup может не дойти до кнопки.
+    const onRelease = (native: PointerEvent) => {
+      if (native.pointerId !== pointerId) return;
+      endHoldRecording();
+    };
+    const onCancel = (native: PointerEvent) => {
+      if (native.pointerId !== pointerId) return;
+      cancelHold();
+    };
+    hold.cleanup = () => {
+      window.removeEventListener("pointerup", onRelease);
+      window.removeEventListener("pointercancel", onCancel);
+    };
+    window.addEventListener("pointerup", onRelease);
+    window.addEventListener("pointercancel", onCancel);
+
     hold.timer = window.setTimeout(() => {
       if (holdRef.current !== hold) return;
       hold.started = true;
@@ -787,11 +858,11 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     const dy = event.clientY - hold.startY;
     if (dx < -72 && Math.abs(dy) < 90) {
       if (hold.timer) window.clearTimeout(hold.timer);
+      hold.cleanup?.();
       holdRef.current = null;
       recCancel.current = true;
       setRecCancelled(true);
       finishRecording();
-      notify("Запись отменена");
     }
   };
 
@@ -799,6 +870,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     const hold = holdRef.current;
     if (!hold) return;
     holdRef.current = null;
+    hold.cleanup?.();
     if (hold.timer) window.clearTimeout(hold.timer);
     if (event) {
       try { event.currentTarget.releasePointerCapture(hold.pointerId); } catch { /* noop */ }
@@ -814,6 +886,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     const tooShort = Date.now() - hold.at < 500;
     if (tooShort) {
       recCancel.current = true;
+      recSilent.current = true;
       setRecCancelled(true);
     }
     finishRecording();
@@ -978,19 +1051,19 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
             <motion.button type="button" initial={{ scale: 0.7, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} whileTap={{ scale: 0.9 }} onClick={handleSendText} className="mb-0.5 grid size-[42px] shrink-0 place-items-center rounded-full bg-primary text-primary-foreground"><Send size={17} /></motion.button>
           ) : (
             <div className="mb-0.5 flex shrink-0 items-center">
-              <motion.button
+              <button
                 type="button"
                 aria-label={recMode === "voice"
                   ? "Голосовое сообщение: удерживайте, чтобы записать. Нажмите, чтобы переключить на видео"
                   : "Видеосообщение: удерживайте, чтобы записать. Нажмите, чтобы переключить на голос"}
                 title={recMode === "voice" ? "Удерживайте — голосовое, нажмите — видео" : "Удерживайте — видеосообщение, нажмите — голос"}
-                whileTap={{ scale: 0.86 }}
+                draggable={false}
                 onPointerDown={startHoldRecording}
                 onPointerMove={moveHoldRecording}
                 onPointerUp={endHoldRecording}
-                onPointerCancel={endHoldRecording}
+                onPointerCancel={cancelHold}
                 onContextMenu={(event) => event.preventDefault()}
-                className="grid size-[42px] touch-none select-none place-items-center rounded-full text-foreground/80 transition-colors hover:bg-foreground/6 active:bg-foreground/10"
+                className="grid size-[42px] touch-none select-none place-items-center rounded-full text-foreground/80 transition-[transform,background-color] duration-150 hover:bg-foreground/6 active:scale-[0.92] active:bg-foreground/10"
               >
                 <AnimatePresence mode="wait" initial={false}>
                   <motion.span
@@ -1004,7 +1077,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
                     {recMode === "voice" ? <Mic size={21} /> : <Video size={20} />}
                   </motion.span>
                 </AnimatePresence>
-              </motion.button>
+              </button>
             </div>
           )}
         </div>
@@ -1028,9 +1101,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
           <SettingsRow icon={<ImageIcon size={16} />} label="Фото" onClick={() => photoInput.current?.click()} className="border-0" />
           <SettingsRow icon={<Camera size={16} />} label="Камера" onClick={() => cameraInput.current?.click()} className="border-0" />
           <SettingsRow icon={<FileIcon size={16} />} label="Файл" onClick={() => fileInput.current?.click()} className="border-0" />
-          <SettingsRow icon={<MapPin size={16} />} label="Геопозиция" onClick={sendLocation} className="border-0" />
-          <SettingsRow icon={<BarChart3 size={16} />} label="Опрос" onClick={() => { setAttachOpen(false); setTimeout(() => setPollOpen(true), 120); }} className="border-0" />
-          <SettingsRow icon={<Phone size={16} />} label="Контакт" last onClick={() => notify("Контакты позже")} className="border-0" />
+          <SettingsRow icon={<BarChart3 size={16} />} label="Опрос" last onClick={() => { setAttachOpen(false); setTimeout(() => setPollOpen(true), 120); }} className="border-0" />
         </div>
         <input ref={photoInput} type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void handlePhoto(f); e.target.value = ""; }} />
         <input ref={cameraInput} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void handlePhoto(f); e.target.value = ""; }} />
@@ -1131,7 +1202,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
 
       <ContactPicker open={Boolean(forwardMessageTarget)} onClose={() => setForwardMessageTarget(null)} title="Переслать" onPick={(contact) => {
         if (!forwardMessageTarget) return;
-        const targetId = openOrCreateChat({ name: contact.name, username: contact.username, phone: contact.phone, online: contact.online, lastSeen: contact.lastSeen });
+        const targetId = openOrCreateChat({ name: contact.name, username: contact.username, email: contact.email, phone: contact.phone, avatar: contact.avatar, online: contact.online, lastSeen: contact.lastSeen, remote: Boolean(contact.email) });
         forwardMessage(targetId, forwardMessageTarget.id);
         notify(`Переслано: ${contact.name}`); setForwardMessageTarget(null);
       }} />

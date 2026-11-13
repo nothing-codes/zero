@@ -7,8 +7,13 @@ import { supabase } from "./supabase";
  */
 export const MEDIA_BUCKET = "zero-media";
 
-function extensionFor(blob: Blob, kind: "voice" | "videoNote") {
+function extensionFor(blob: Blob, kind: "voice" | "videoNote" | "photo") {
   const type = (blob.type || "").toLowerCase();
+  if (kind === "photo") {
+    if (type.includes("png")) return "png";
+    if (type.includes("webp")) return "webp";
+    return "jpg";
+  }
   if (type.includes("mp4")) return kind === "voice" ? "m4a" : "mp4";
   if (type.includes("mpeg")) return "mp3";
   if (type.includes("ogg")) return "ogg";
@@ -27,10 +32,10 @@ export function pickRecorderMime(kind: "voice" | "videoNote"): string | undefine
   return candidates.find((type) => MediaRecorder.isTypeSupported(type));
 }
 
-export async function uploadMedia(blob: Blob, kind: "voice" | "videoNote"): Promise<string> {
+export async function uploadMedia(blob: Blob, kind: "voice" | "videoNote" | "photo"): Promise<string> {
   const ext = extensionFor(blob, kind);
   const path = `${kind}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
-  const contentType = (blob.type || "").split(";")[0] || (kind === "voice" ? "audio/webm" : "video/webm");
+  const contentType = (blob.type || "").split(";")[0] || (kind === "photo" ? "image/jpeg" : kind === "voice" ? "audio/webm" : "video/webm");
 
   const { error } = await supabase.storage.from(MEDIA_BUCKET).upload(path, blob, {
     contentType,

@@ -24,6 +24,8 @@ export interface Contact {
   name: string;
   username: string;
   phone: string;
+  email?: string;
+  avatar?: string | null;
   online: boolean;
   lastSeen?: number;
   bio: string;

@@ -1,7 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import {
   ArrowLeft,
-  BadgeCheck,
   Bell,
   Check,
   ChevronRight,
@@ -106,9 +105,6 @@ export function SettingsScreen({ onOpenProfile }: { onOpenProfile: () => void })
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5">
                       <span className="t-body truncate font-semibold">{user.name}</span>
-                      {user.verified !== false ? (
-                        <BadgeCheck size={16} className="shrink-0 text-foreground/60" strokeWidth={1.9} />
-                      ) : null}
                     </span>
                     <span className="t-sub mt-0.5 block truncate text-faint">@{user.username}</span>
                   </span>

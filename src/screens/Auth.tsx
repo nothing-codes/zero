@@ -30,11 +30,29 @@ function EmailStep({
   onContinue: () => void;
 }) {
   const valid = isValidEmail(email);
+  const inputRef = useRef<HTMLInputElement>(null);
+  // «Изменить» закрывает окно до следующей правки адреса, чтобы оно не
+  // возвращалось сразу после нажатия.
+  const [hiddenFor, setHiddenFor] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
+  // Окно подтверждения выезжает снизу, но не во время набора: ждём паузу,
+  // чтобы оно не выскакивало на каждой введённой букве.
   useEffect(() => {
-    if (valid) setConfirmOpen(true);
-  }, [valid]);
+    if (!valid || hiddenFor === email.trim()) {
+      setConfirmOpen(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setConfirmOpen(true), 420);
+    return () => window.clearTimeout(timer);
+  }, [valid, email, hiddenFor]);
+
+  const backToEditing = () => {
+    setConfirmOpen(false);
+    setHiddenFor(email.trim());
+    // Ждём, пока окно уедет вниз, и только потом возвращаем клавиатуру.
+    window.setTimeout(() => inputRef.current?.focus(), 420);
+  };
 
   return (
     <div className="flex h-full flex-col px-6">
@@ -51,13 +69,24 @@ function EmailStep({
 
           <div className="mt-2 flex h-[56px] items-center overflow-hidden rounded-[14px] border border-foreground/10 bg-foreground/[0.05] transition-colors focus-within:border-foreground/30">
             <input
+              ref={inputRef}
               id="email"
               type="email"
               inputMode="email"
               autoComplete="email"
+              enterKeyHint="go"
               autoFocus
               value={email}
-              onChange={(event) => onEmail(event.target.value.slice(0, 120))}
+              onChange={(event) => {
+                setHiddenFor(null);
+                onEmail(event.target.value.slice(0, 120));
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && valid) {
+                  event.preventDefault();
+                  onContinue();
+                }
+              }}
               placeholder="you@gmail.com"
               className="h-full min-w-0 flex-1 bg-transparent px-4 text-[16px] tracking-[0.01em] outline-none"
             />
@@ -69,17 +98,14 @@ function EmailStep({
         </div>
       </div>
 
-      <Sheet open={confirmOpen} onClose={() => setConfirmOpen(false)} title="Проверьте почту">
+      <Sheet
+        open={confirmOpen}
+        onClose={backToEditing}
+        title="Проверьте почту"
+      >
         <p className="t-body mt-2 break-all text-muted-foreground">{email.trim()}</p>
         <div className="mt-6 flex gap-2 pb-4">
-          <Button
-            variant="secondary"
-            className="flex-1"
-            onClick={() => {
-              setConfirmOpen(false);
-              onEmail("");
-            }}
-          >
+          <Button variant="secondary" className="flex-1" onClick={backToEditing}>
             Изменить
           </Button>
           <Button
@@ -89,7 +115,7 @@ function EmailStep({
               onContinue();
             }}
           >
-            Всё верно
+            Продолжить
           </Button>
         </div>
       </Sheet>

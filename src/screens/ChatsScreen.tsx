@@ -142,7 +142,7 @@ export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => vo
 
   const sorted = useMemo(() => {
     const q = query.trim().toLowerCase();
-    const filtered = q ? state.chats.filter((chat) => chat.name.toLowerCase().includes(q) || chat.messages.some((m) => (m.text ?? "").toLowerCase().includes(q))) : state.chats;
+    const filtered = q ? state.chats.filter((chat) => chat.name.toLowerCase().includes(q) || (chat.username ?? "").toLowerCase().includes(q) || (chat.email ?? "").toLowerCase().includes(q) || chat.messages.some((m) => (m.text ?? "").toLowerCase().includes(q))) : state.chats;
     return [...filtered].sort((a, b) => {
       if (a.id === "c_saved") return -1;
       if (b.id === "c_saved") return 1;
@@ -159,7 +159,16 @@ export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => vo
   const searching = query.trim().length > 0;
 
   const pick = (contact: Contact) => {
-    const id = openOrCreateChat({ name: contact.name, username: contact.username, phone: contact.phone, online: contact.online, lastSeen: contact.lastSeen });
+    const id = openOrCreateChat({
+      name: contact.name,
+      username: contact.username,
+      email: contact.email,
+      phone: contact.phone,
+      avatar: contact.avatar,
+      online: contact.online,
+      lastSeen: contact.lastSeen,
+      remote: Boolean(contact.email),
+    });
     onOpenChat(id);
   };
 

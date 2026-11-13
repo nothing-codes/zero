@@ -182,3 +182,19 @@ export function messagePreview(text: string, max = 62) {
   const clean = text.replace(/\s+/g, " ").trim();
   return clean.length > max ? `${clean.slice(0, max - 1)}…` : clean;
 }
+
+/** Реальный адрес приложения — вместо несуществующего zero.app. */
+export function appOrigin() {
+  if (typeof window === "undefined") return "https://zero-nothing.vercel.app";
+  return window.location.origin;
+}
+
+export function appLink(path = "/") {
+  const origin = appOrigin();
+  if (!path || path === "/") return origin;
+  return `${origin}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+export function appHost() {
+  return appLink().replace(/^https?:\/\//, "").replace(/\/$/, "");
+}

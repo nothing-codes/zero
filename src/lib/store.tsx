@@ -14,6 +14,7 @@ import type {
   Chat,
   Message,
   MessageKind,
+  MessagePayload,
   MessageStatus,
   Settings,
   ToastData,
@@ -21,6 +22,17 @@ import type {
 } from "../types";
 import { createInitialState, DEFAULT_SETTINGS, STATE_VERSION } from "./data";
 import { loadCloudState, saveCloudState } from "./cloud";
+import { supabase } from "./supabase";
+import {
+  loadConversation,
+  loadRecentIncoming,
+  normalizeEmail,
+  normalizeUsername,
+  sendRemoteMessage,
+  subscribeToIncoming,
+  upsertProfile,
+  type RemoteMessageRow,
+} from "./chat";
 import { haptic, stripEmoji, uid } from "./utils";
 import {
   playTone,
@@ -48,7 +60,6 @@ function cleanChats(chats: Chat[]): Chat[] {
     ...chat,
     typing: false,
     name: stripEmoji(chat.name),
-    autoReply: chat.autoReply?.map(stripEmoji),
     messages: chat.messages.map((message) => {
       const next = {
         ...message,
@@ -153,6 +164,21 @@ function previewOf(message: Message): string {
   }
 }
 
+function payloadOf(message: Message): MessagePayload {
+  return {
+    kind: message.kind,
+    text: message.text,
+    sticker: message.sticker,
+    voice: message.voice,
+    videoNote: message.videoNote,
+    photo: message.photo,
+    file: message.file,
+    location: message.location,
+    poll: message.poll,
+    forwardedFrom: message.forwardedFrom,
+  };
+}
+
 export function chatPreview(chat: Chat): string {
   const last = chat.messages[chat.messages.length - 1];
   if (!last) return "Нет сообщений";
@@ -172,19 +198,7 @@ export function chatPreview(chat: Chat): string {
   return `${prefix}${previewOf(last)}`;
 }
 
-export interface SendPayload {
-  kind: MessageKind;
-  text?: string;
-  sticker?: string;
-  voice?: Message["voice"];
-  videoNote?: Message["videoNote"];
-  photo?: Message["photo"];
-  file?: Message["file"];
-  location?: Message["location"];
-  poll?: Message["poll"];
-  replyTo?: string;
-  forwardedFrom?: string;
-}
+export type SendPayload = MessagePayload;
 
 interface StoreValue {
   state: AppState;
@@ -207,7 +221,12 @@ interface StoreValue {
   updateSettings: (patch: Partial<Settings>) => void;
   sendMessage: (chatId: string, data: SendPayload) => string | undefined;
   setMessageMediaSource: (chatId: string, messageId: string, kind: "voice" | "videoNote", src: string) => void;
-  receiveMessage: (chatId: string, data: SendPayload) => void;
+  receiveMessage: (
+    chatId: string,
+    data: SendPayload,
+    meta?: { id?: string; at?: number },
+  ) => void;
+  loadChatHistory: (chatId: string) => Promise<void>;
   forwardMessage: (targetChatId: string, messageId: string) => void;
   setActiveChat: (id: string | null) => void;
   setTyping: (chatId: string, typing: boolean) => void;
@@ -224,10 +243,12 @@ interface StoreValue {
   openOrCreateChat: (contact: {
     name: string;
     username?: string;
+    email?: string;
     phone?: string;
     online?: boolean;
     lastSeen?: number;
     avatar?: string | null;
+    remote?: boolean;
   }) => string;
   addCall: (call: Omit<CallRecord, "id" | "at">) => void;
   clearMessages: (chatId: string) => void;
@@ -240,6 +261,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const stateRef = useRef(state);
   const activeChatRef = useRef<string | null>(null);
   const cloudPulledFor = useRef<string | null>(null);
+  const syncedFor = useRef<string | null>(null);
   const toastTimer = useRef<number | null>(null);
   const [toast, setToast] = useState<ToastData | null>(null);
 
@@ -304,6 +326,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     }, 1600);
     return () => window.clearTimeout(timer);
   }, [state]);
+
+  // Публичный профиль: по нему другие люди находят вас через @username.
+  useEffect(() => {
+    if (!state.user?.email) return;
+    void upsertProfile(state.user).catch(() => undefined);
+  }, [state.user]);
 
   // Theme + motion preferences
   useEffect(() => {
@@ -381,17 +409,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   );
 
   const receiveMessage = useCallback(
-    (chatId: string, data: SendPayload) => {
+    (chatId: string, data: SendPayload, meta?: { id?: string; at?: number }) => {
       const chat = stateRef.current.chats.find((c) => c.id === chatId);
       if (!chat) return;
+      if (meta?.id && chat.messages.some((message) => message.id === meta.id)) return;
       const message: Message = {
-        id: uid("m"),
+        id: meta?.id ?? uid("m"),
         chatId,
         fromMe: false,
-        at: Date.now(),
+        at: meta?.at ?? Date.now(),
         status: undefined,
         ...data,
         fresh: true,
+        remoteId: meta?.id,
       };
       const isOpen = activeChatRef.current === chatId;
       commit((prev) => ({
@@ -434,6 +464,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [commit, pushToast],
   );
 
+  const pushToRemote = useCallback(
+    (chat: Chat, message: Message, data: SendPayload) => {
+      const current = stateRef.current.user;
+      if (!current?.email || !chat.remote || !chat.email) return;
+      void sendRemoteMessage({
+        from: current,
+        toEmail: chat.email,
+        toUsername: chat.username ?? "",
+        toName: chat.name,
+        payload: data,
+        clientId: message.id,
+        at: message.at,
+      }).catch(() => undefined);
+    },
+    [],
+  );
+
   const sendMessage = useCallback(
     (chatId: string, data: SendPayload): string | undefined => {
       const chat = stateRef.current.chats.find((c) => c.id === chatId);
@@ -458,6 +505,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (stateRef.current.settings.sound) playTone("send");
       if (stateRef.current.settings.vibration) haptic(6);
 
+      // Голосовые и видеокружки сначала получают локальный blob-URL, а в
+      // Supabase уходят после загрузки файла (см. setMessageMediaSource).
+      const pendingMedia =
+        (data.kind === "voice" && data.voice?.src?.startsWith("blob:")) ||
+        (data.kind === "videoNote" && data.videoNote?.src?.startsWith("blob:"));
+      if (!pendingMedia) pushToRemote(chat, message, data);
+
       const setStatus = (status: MessageStatus) => {
         commit((prev) => ({
           ...prev,
@@ -479,28 +533,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         if (stateRef.current.settings.readReceipts) setStatus("read");
       }, 1500);
 
-      if (chat.autoReply && chat.autoReply.length > 0 && !chat.group) {
-        const replies = chat.autoReply;
-        const outgoing = chat.messages.filter((m) => m.fromMe).length;
-        const reply = replies[outgoing % replies.length];
-        window.setTimeout(() => {
-          const exists = stateRef.current.chats.some((c) => c.id === chatId);
-          if (exists) setTyping(chatId, true);
-        }, 850);
-        window.setTimeout(() => {
-          const exists = stateRef.current.chats.some((c) => c.id === chatId);
-          if (exists) {
-            receiveMessage(chatId, {
-              kind: "text",
-              text: reply,
-            });
-          }
-        }, 2600);
-      }
-
       return message.id;
     },
-    [commit, receiveMessage, setTyping],
+    [commit, pushToRemote],
   );
 
   const setMessageMediaSource = useCallback(
@@ -524,8 +559,18 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           };
         }),
       }));
+
+      // Файл загружен — теперь сообщение можно отправить собеседнику.
+      const chat = stateRef.current.chats.find((item) => item.id === chatId);
+      const message = chat?.messages.find((item) => item.id === messageId);
+      if (!chat || !message) return;
+      const payload: SendPayload =
+        kind === "voice"
+          ? { kind: "voice", voice: message.voice }
+          : { kind: "videoNote", videoNote: message.videoNote };
+      pushToRemote(chat, message, payload);
     },
-    [commit],
+    [commit, pushToRemote],
   );
 
   const forwardMessage = useCallback(
@@ -559,6 +604,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ),
       }));
       if (stateRef.current.settings.sound) playTone("send");
+
+      const target = stateRef.current.chats.find((c) => c.id === targetChatId);
+      if (target) pushToRemote(target, clone, payloadOf(clone));
       window.setTimeout(() => {
         commit((prev) => ({
           ...prev,
@@ -575,7 +623,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }));
       }, 500);
     },
-    [commit],
+    [commit, pushToRemote],
   );
 
   const setActiveChat = useCallback((id: string | null) => {
@@ -743,35 +791,261 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     (contact: {
       name: string;
       username?: string;
+      email?: string;
       phone?: string;
       online?: boolean;
       lastSeen?: number;
       avatar?: string | null;
+      remote?: boolean;
     }) => {
-      const existing = stateRef.current.chats.find(
-        (c) =>
-          c.name === contact.name ||
-          (contact.username && c.username === contact.username),
-      );
-      if (existing) return existing.id;
+      const email = normalizeEmail(contact.email ?? "");
+      const username = normalizeUsername(contact.username ?? "");
+      // Не склеиваем разных людей с одинаковым именем: имя — только запасной
+      // ключ, когда у контакта нет ни email, ни @username. Иначе сообщение
+      // могло уйти не тому человеку.
+      const byEmail = email
+        ? stateRef.current.chats.find(
+            (c) => Boolean(c.email) && normalizeEmail(c.email ?? "") === email,
+          )
+        : undefined;
+      // @username — уникальный ключ. Чат без email можно "повысить" до
+      // настоящего, но чужой email при этом не перезаписываем.
+      const byUsername =
+        !byEmail && username
+          ? stateRef.current.chats.find(
+              (c) =>
+                normalizeUsername(c.username ?? "") === username &&
+                (!email || !c.email),
+            )
+          : undefined;
+      const existing =
+        byEmail ??
+        byUsername ??
+        (email || username
+          ? undefined
+          : stateRef.current.chats.find((c) => c.name === contact.name));
+      if (existing) {
+        const nextEmail = email && !existing.email ? email : undefined;
+        const nextUsername = username && !existing.username ? username : undefined;
+        const nextAvatar = contact.avatar && !existing.avatar ? contact.avatar : undefined;
+        const nextRemote = email && !existing.remote ? true : undefined;
+        if (nextEmail || nextUsername || nextAvatar || nextRemote) {
+          commit((prev) => ({
+            ...prev,
+            chats: prev.chats.map((c) =>
+              c.id === existing.id
+                ? {
+                    ...c,
+                    email: nextEmail ?? c.email,
+                    username: nextUsername ?? c.username,
+                    avatar: nextAvatar ?? c.avatar,
+                    remote: nextRemote ?? c.remote,
+                  }
+                : c,
+            ),
+          }));
+        }
+        return existing.id;
+      }
       const id = uid("c");
+      const isRemote = Boolean(email) || Boolean(contact.remote);
       const chat: Chat = {
         id,
         name: contact.name,
-        username: contact.username,
+        username: username || undefined,
+        email: email || undefined,
         phone: contact.phone,
         online: contact.online,
         lastSeen: contact.lastSeen,
         avatar: contact.avatar ?? null,
         unread: 0,
         messages: [],
-        autoReply: ["Привет! Рад тебя видеть здесь.", "На связи.", "Давай созвонимся позже?"],
+        remote: isRemote,
+        historyLoaded: !isRemote,
       };
       commit((prev) => ({ ...prev, chats: [chat, ...prev.chats] }));
       return id;
     },
     [commit],
   );
+
+  /** Подгружает историю диалога из Supabase при открытии чата. */
+  const loadChatHistory = useCallback(
+    async (chatId: string) => {
+      const chat = stateRef.current.chats.find((item) => item.id === chatId);
+      const me = stateRef.current.user;
+      if (!chat?.remote || !chat.email || !me?.email) return;
+
+      let rows: RemoteMessageRow[];
+      try {
+        rows = await loadConversation(me.email, chat.email);
+      } catch {
+        return;
+      }
+      const myEmail = normalizeEmail(me.email);
+      const remoteMessages: Message[] = rows.map((row) => ({
+        id: row.id,
+        chatId,
+        fromMe: normalizeEmail(row.sender_email) === myEmail,
+        at: new Date(row.created_at).getTime(),
+        status: normalizeEmail(row.sender_email) === myEmail ? "read" : undefined,
+        remoteId: row.id,
+        ...row.payload,
+      }));
+      const remoteIds = new Set(remoteMessages.map((message) => message.id));
+      const clientIds = new Set(
+        rows.map((row) => row.client_id).filter((value): value is string => Boolean(value)),
+      );
+
+      commit((prev) => ({
+        ...prev,
+        chats: prev.chats.map((item) => {
+          if (item.id !== chatId) return item;
+          const localOnly = item.messages.filter(
+            (message) => !remoteIds.has(message.id) && !clientIds.has(message.id),
+          );
+          const merged = [...localOnly, ...remoteMessages].sort((a, b) => a.at - b.at);
+          return { ...item, messages: merged, historyLoaded: true };
+        }),
+      }));
+    },
+    [commit],
+  );
+
+  // Realtime: входящие сообщения от других людей приходят сразу, без
+  // перезагрузки. Чат создаётся автоматически, если его ещё нет.
+  useEffect(() => {
+    const currentUser = state.user;
+    if (!currentUser?.email) return;
+    const email = normalizeEmail(currentUser.email);
+    const channel = subscribeToIncoming(email, (row) => {
+      const senderEmail = normalizeEmail(row.sender_email);
+      if (senderEmail === email) return;
+      const senderUsername = normalizeUsername(row.sender_username);
+      // openOrCreateChat сам найдёт существующий чат по email/@username и
+      // при необходимости сделает его настоящим (email + remote).
+      const chatId = openOrCreateChat({
+        name: row.sender_name || row.sender_username || senderEmail,
+        username: senderUsername,
+        email: senderEmail,
+        avatar: row.sender_avatar,
+        online: true,
+        remote: true,
+      });
+      receiveMessage(chatId, row.payload, {
+        id: row.id,
+        at: new Date(row.created_at).getTime() || Date.now(),
+      });
+    });
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [state.user?.id, openOrCreateChat, receiveMessage]);
+
+  // При входе "догоняем" входящие, которые пришли, пока приложение было
+  // закрыто: Realtime доставляет только то, что случилось при открытой
+  // вкладке. Уже известные сообщения не дублируются и не считаются
+  // непрочитанными повторно.
+  useEffect(() => {
+    const currentUser = state.user;
+    if (!currentUser?.email) {
+      syncedFor.current = null;
+      return;
+    }
+    const email = normalizeEmail(currentUser.email);
+    if (syncedFor.current === email) return;
+    syncedFor.current = email;
+    let cancelled = false;
+    let done = false;
+    let attempts = 0;
+    let retryTimer: number | null = null;
+
+    const run = async () => {
+      let rows: RemoteMessageRow[];
+      try {
+        rows = await loadRecentIncoming(email);
+      } catch {
+        // Сеть пропала или схема ещё не применена. Пробуем ещё пару раз,
+        // а также сразу после восстановления соединения.
+        attempts += 1;
+        if (!cancelled && !done && attempts < 3) {
+          retryTimer = window.setTimeout(() => { void run(); }, 20000);
+        }
+        return;
+      }
+      done = true;
+      if (cancelled || rows.length === 0) return;
+
+      const groups = new Map<string, RemoteMessageRow[]>();
+      for (const row of [...rows].reverse()) {
+        const sender = normalizeEmail(row.sender_email);
+        if (!sender || sender === email) continue;
+        const list = groups.get(sender) ?? [];
+        list.push(row);
+        groups.set(sender, list);
+      }
+
+      for (const [sender, senderRows] of groups) {
+        const last = senderRows[senderRows.length - 1];
+        const chatId = openOrCreateChat({
+          name: last.sender_name || last.sender_username || sender,
+          username: last.sender_username,
+          email: sender,
+          avatar: last.sender_avatar,
+          remote: true,
+        });
+
+        commit((prev) => ({
+          ...prev,
+          chats: prev.chats.map((chat) => {
+            if (chat.id !== chatId) return chat;
+            const known = new Set(chat.messages.map((message) => message.id));
+            const additions = senderRows
+              .filter(
+                (row) =>
+                  !known.has(row.id) &&
+                  !(row.client_id ? known.has(row.client_id) : false),
+              )
+              .map<Message>((row) => ({
+                id: row.id,
+                chatId,
+                fromMe: false,
+                at: new Date(row.created_at).getTime(),
+                remoteId: row.id,
+                fresh: activeChatRef.current !== chatId,
+                ...row.payload,
+              }));
+            if (additions.length === 0) return chat;
+            const isOpen = activeChatRef.current === chatId;
+            return {
+              ...chat,
+              unread: isOpen ? 0 : chat.unread + additions.length,
+              messages: [...chat.messages, ...additions].sort((a, b) => a.at - b.at),
+            };
+          }),
+        }));
+      }
+    };
+    void run();
+
+    const onOnline = () => {
+      if (cancelled || done) return;
+      attempts = 0;
+      if (retryTimer) {
+        window.clearTimeout(retryTimer);
+        retryTimer = null;
+      }
+      void run();
+    };
+    window.addEventListener("online", onOnline);
+
+    return () => {
+      cancelled = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+      window.removeEventListener("online", onOnline);
+    };
+  }, [state.user?.email, openOrCreateChat, commit]);
 
   const addCall = useCallback(
     (call: Omit<CallRecord, "id" | "at">) => {
@@ -824,7 +1098,6 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           stripEmoji(input.name).toLowerCase().replace(/\s+/g, "_").slice(0, 24) ||
           "user",
         email: key,
-        verified: true,
         bio: stripEmoji(input.bio ?? ""),
         status: stripEmoji(input.status ?? "") || "На связи",
         avatar: input.avatar ?? null,
@@ -909,6 +1182,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       sendMessage,
       setMessageMediaSource,
       receiveMessage,
+      loadChatHistory,
       forwardMessage,
       setActiveChat,
       setTyping,
@@ -940,6 +1214,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     sendMessage,
     setMessageMediaSource,
     receiveMessage,
+    loadChatHistory,
     forwardMessage,
     setActiveChat,
     setTyping,

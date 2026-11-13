@@ -1,11 +1,11 @@
 import { motion } from "motion/react";
-import { ArrowLeft, BadgeCheck, CalendarDays, Camera, Check, ChevronRight, Lock, Mail, MessageCircle, Pencil, Share2 } from "lucide-react";
+import { ArrowLeft, CalendarDays, Camera, Check, ChevronRight, Lock, Mail, MessageCircle, Pencil, Share2 } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { Avatar } from "../components/Avatar";
 import { Button, IconButton, Sheet } from "../components/ui";
 import { fileToAvatar, shareText } from "../lib/image";
 import { useAuthedStore } from "../lib/store";
-import { cn, haptic } from "../lib/utils";
+import { appLink, cn, haptic } from "../lib/utils";
 
 export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; onOpenSettings: () => void; }) {
   const { state, user, updateProfile } = useAuthedStore();
@@ -46,7 +46,7 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
         <span className="t-cap text-faint">Профиль</span>
         <IconButton label="Поделиться" onClick={async () => {
           haptic(6);
-          const ok = await shareText(`@${user.username} в Zero — https://zero.app/@${user.username}`);
+          const ok = await shareText(`@${user.username} в Zero — ${appLink()}`);
           setShared(ok);
           window.setTimeout(() => setShared(false), 2000);
         }}>
@@ -66,9 +66,6 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
 
           <h1 className="t-title mt-5 flex items-center justify-center gap-1.5">
             <span className="truncate">{user.name}</span>
-            {user.verified !== false ? (
-              <BadgeCheck size={20} className="shrink-0 text-foreground/60" strokeWidth={1.9} />
-            ) : null}
           </h1>
           <p className="t-sub mt-1 text-faint">@{user.username}</p>
           <div className="mt-3 flex items-center gap-1.5 rounded-full border border-foreground/10 bg-foreground/[0.04] px-3 py-1.5">

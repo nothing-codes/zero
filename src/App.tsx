@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { WifiOff } from "lucide-react";
 import { CallOverlay } from "./components/CallOverlay";
@@ -21,18 +21,90 @@ type ActiveCall = { chatId: string; incoming?: IncomingCall } | null;
 const TABS: Tab[] = ["chats", "contacts", "calls", "settings"];
 
 export function App() {
-  const { state, user, receiveMessage, openOrCreateChat } = useStore();
+  const { state, user, openOrCreateChat } = useStore();
   const [tab, setTab] = useState<Tab>("chats");
   const [overlay, setOverlay] = useState<Overlay>(null);
   const [call, setCall] = useState<ActiveCall>(null);
   const [offline, setOffline] = useState(
     typeof navigator !== "undefined" ? !navigator.onLine : false,
   );
-  const greeted = useRef(false);
   const chatsRef = useRef(state.chats);
   chatsRef.current = state.chats;
   const callRef = useRef<ActiveCall>(null);
   callRef.current = call;
+  const overlayRef = useRef<Overlay>(null);
+  overlayRef.current = overlay;
+  const tabRef = useRef<Tab>("chats");
+  tabRef.current = tab;
+  const uiEntries = useRef(0);
+  const suppressPop = useRef(0);
+
+  /** Добавляет запись истории, чтобы Android Back закрывал экран, а не приложение. */
+  const pushUiEntry = useCallback(() => {
+    try {
+      window.history.pushState(
+        { ...(window.history.state ?? {}), zeroUi: Date.now() },
+        "",
+      );
+      uiEntries.current += 1;
+    } catch {
+      /* история недоступна — работаем как раньше */
+    }
+  }, []);
+
+  /** Закрывает текущий экран и убирает соответствующую запись истории. */
+  const exitUi = useCallback(() => {
+    if (uiEntries.current <= 0) return;
+    uiEntries.current -= 1;
+    suppressPop.current += 1;
+    const pending = suppressPop.current;
+    window.setTimeout(() => {
+      if (suppressPop.current === pending) suppressPop.current = 0;
+    }, 900);
+    try {
+      window.history.back();
+    } catch {
+      suppressPop.current = 0;
+    }
+  }, []);
+
+  const openOverlay = useCallback(
+    (next: Overlay) => {
+      pushUiEntry();
+      setOverlay(next);
+    },
+    [pushUiEntry],
+  );
+
+  const closeOverlay = useCallback(() => {
+    setOverlay(null);
+    exitUi();
+  }, [exitUi]);
+
+  const openCall = useCallback(
+    (chatId: string) => {
+      pushUiEntry();
+      setCall({ chatId });
+    },
+    [pushUiEntry],
+  );
+
+  const closeCall = useCallback(() => {
+    setCall(null);
+    exitUi();
+  }, [exitUi]);
+
+  const changeTab = useCallback(
+    (next: Tab) => {
+      if (next === tabRef.current) return;
+      const fromRoot = tabRef.current === "chats";
+      const toRoot = next === "chats";
+      setTab(next);
+      if (fromRoot && !toRoot) pushUiEntry();
+      else if (!fromRoot && toRoot) exitUi();
+    },
+    [exitUi, pushUiEntry],
+  );
 
   useEffect(() => {
     const online = () => setOffline(false);
@@ -45,11 +117,38 @@ export function App() {
     };
   }, []);
 
+  // Аппаратная/жестовая кнопка «Назад» на Android: закрываем верхний экран
+  // приложения (звонок → чат → вкладку), а не выходим из приложения.
+  useEffect(() => {
+    const onPopState = () => {
+      if (suppressPop.current > 0) {
+        suppressPop.current -= 1;
+        return;
+      }
+      uiEntries.current = Math.max(0, uiEntries.current - 1);
+      if (callRef.current) {
+        setCall(null);
+        return;
+      }
+      if (overlayRef.current) {
+        setOverlay(null);
+        return;
+      }
+      if (tabRef.current !== "chats") {
+        setTab("chats");
+      }
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
   useEffect(() => {
     if (!user) {
       setOverlay(null);
       setCall(null);
       setTab("chats");
+      uiEntries.current = 0;
+      suppressPop.current = 0;
     }
   }, [user]);
 
@@ -72,6 +171,7 @@ export function App() {
             online: true,
           });
         haptic([12, 40, 12]);
+        pushUiEntry();
         setCall({
           chatId,
           incoming: {
@@ -89,25 +189,11 @@ export function App() {
         void supabase.removeChannel(channel);
       });
     };
-  }, [user, openOrCreateChat]);
-
-  useEffect(() => {
-    if (!user || greeted.current) return;
-    greeted.current = true;
-    const target = chatsRef.current.find((chat) => !chat.group && !chat.muted);
-    if (!target) return;
-    const timer = window.setTimeout(() => {
-      receiveMessage(target.id, {
-        kind: "text",
-        text: "Привет! Увидел, что ты уже здесь. Как тебе Zero?",
-      });
-    }, 11_000);
-    return () => window.clearTimeout(timer);
-  }, [user, receiveMessage]);
+  }, [user, openOrCreateChat, pushUiEntry]);
 
   const openChat = (chatId: string) => {
     haptic(4);
-    setOverlay({ type: "chat", chatId });
+    openOverlay({ type: "chat", chatId });
   };
 
   if (!user) {
@@ -139,13 +225,13 @@ export function App() {
                 <ChatsScreen onOpenChat={openChat} />
               ) : null}
               {item === "contacts" ? (
-                <ContactsScreen onOpenChat={openChat} onCall={(chatId) => setCall({ chatId })} />
+                <ContactsScreen onOpenChat={openChat} onCall={openCall} />
               ) : null}
               {item === "calls" ? (
-                <CallsScreen onCall={(chatId) => setCall({ chatId })} />
+                <CallsScreen onCall={openCall} />
               ) : null}
               {item === "settings" ? (
-                <SettingsScreen onOpenProfile={() => setOverlay({ type: "profile" })} />
+                <SettingsScreen onOpenProfile={() => openOverlay({ type: "profile" })} />
               ) : null}
             </div>
           );
@@ -153,7 +239,7 @@ export function App() {
       </div>
 
       {!dockHidden ? (
-        <Dock active={tab} onChange={setTab} />
+        <Dock active={tab} onChange={changeTab} />
       ) : null}
 
       <AnimatePresence>
@@ -169,16 +255,13 @@ export function App() {
             {overlay.type === "chat" ? (
               <ChatScreen
                 chatId={overlay.chatId}
-                onBack={() => setOverlay(null)}
-                onCall={() => setCall({ chatId: overlay.chatId })}
+                onBack={closeOverlay}
+                onCall={() => openCall(overlay.chatId)}
               />
             ) : (
               <ProfileScreen
-                onBack={() => setOverlay(null)}
-                onOpenSettings={() => {
-                  setOverlay(null);
-                  setTab("settings");
-                }}
+                onBack={closeOverlay}
+                onOpenSettings={closeOverlay}
               />
             )}
           </motion.div>
@@ -191,7 +274,7 @@ export function App() {
             key={call.chatId}
             chatId={call.chatId}
             incoming={call.incoming}
-            onClose={() => setCall(null)}
+            onClose={closeCall}
           />
         ) : null}
       </AnimatePresence>
@@ -216,8 +299,28 @@ export function App() {
 }
 
 function Frame({ children }: { children: ReactNode }) {
+  // На iOS клавиатура не меняет layout viewport — подгоняем высоту под
+  // visualViewport, чтобы поле ввода и нижние меню не прятались под ней.
+  const [viewportHeight, setViewportHeight] = useState<number | null>(null);
+
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const update = () => setViewportHeight(vv.height);
+    update();
+    vv.addEventListener("resize", update);
+    vv.addEventListener("scroll", update);
+    return () => {
+      vv.removeEventListener("resize", update);
+      vv.removeEventListener("scroll", update);
+    };
+  }, []);
+
   return (
-    <div className="flex h-[100dvh] min-h-0 w-full justify-center overflow-hidden bg-shell">
+    <div
+      className="flex min-h-0 w-full justify-center overflow-hidden bg-shell"
+      style={{ height: viewportHeight ? `${viewportHeight}px` : "100dvh" }}
+    >
       <div className="relative flex h-full min-h-0 w-full max-w-[520px] flex-col overflow-hidden bg-background shadow-[0_0_0_1px_rgba(255,255,255,0.04)] sm:border-x sm:border-foreground/8">
         {children}
       </div>

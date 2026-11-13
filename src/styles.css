@@ -70,6 +70,33 @@
 
 * {
   -webkit-tap-highlight-color: transparent;
+  -webkit-touch-callout: none;
+}
+
+html,
+body,
+#root {
+  /* В приложении нельзя выделять интерфейс и текст сообщений:
+     копирование доступно через долгое нажатие → «Копировать». */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+input,
+textarea,
+[contenteditable="true"] {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+}
+
+img,
+video,
+canvas,
+svg,
+a,
+button {
+  -webkit-user-drag: none;
 }
 
 html {
@@ -123,6 +150,14 @@ textarea::placeholder {
 :focus-visible {
   outline: 2px solid color-mix(in oklch, var(--foreground) 55%, transparent);
   outline-offset: 2px;
+}
+
+/* Текстовые поля не получают серую рамку фокуса: у контейнера уже есть
+   собственный focus-within-бордер, а лишний outline выглядит как выделение. */
+input:focus-visible,
+textarea:focus-visible,
+[contenteditable="true"]:focus-visible {
+  outline: none;
 }
 
 @layer components {
