@@ -1,4 +1,4 @@
-import type { MessagePayload, PinnedMusic, User } from "../types";
+import type { MessagePayload, PinnedMusic, Settings, User, Visibility } from "../types";
 import { decryptPayload, encryptPayload, isEncryptedPayload, publicKeyFor, refreshPeerKey } from "./e2ee";
 import { supabase } from "./supabase";
 
@@ -24,6 +24,20 @@ export interface ZeroProfile {
   bio: string;
   status: string;
   pinnedMusic?: PinnedMusic | null;
+  lastSeenVisibility?: Visibility;
+  photoVisibility?: Visibility;
+  phoneVisibility?: Visibility;
+}
+
+/** Аватар с учётом настройки «Фото профиля». */
+export function visibleProfileAvatar(
+  profile: ZeroProfile,
+  contact = false,
+): string | null {
+  const visibility = profile.photoVisibility ?? "all";
+  if (visibility === "nobody") return null;
+  if (visibility === "contacts" && !contact) return null;
+  return profile.avatar;
 }
 
 export interface RemoteMessageRow {
@@ -53,28 +67,44 @@ export function conversationKey(a: string, b: string) {
 }
 
 /** Создаёт или обновляет публичный профиль пользователя (для поиска). */
-export async function upsertProfile(user: User): Promise<void> {
+export async function upsertProfile(user: User, settings?: Settings): Promise<void> {
   const email = normalizeEmail(user.email);
   if (!email) return;
   const username = normalizeUsername(user.username);
   if (!username) return;
   const publicKey = await publicKeyFor(email);
 
-  const { error } = await supabase.from(PROFILE_TABLE).upsert(
-    {
-      email,
-      username,
-      name: user.name,
-      avatar: user.avatar ?? null,
-      banner: user.banner ?? null,
-      bio: user.bio ?? "",
-      status: user.status ?? "",
-      pinned_music: user.pinnedMusic ?? null,
-      public_key: publicKey,
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: "email" },
-  );
+  const baseRow = {
+    email,
+    username,
+    name: user.name,
+    avatar: user.avatar ?? null,
+    banner: user.banner ?? null,
+    bio: user.bio ?? "",
+    status: user.status ?? "",
+    pinned_music: user.pinnedMusic ?? null,
+    public_key: publicKey,
+    updated_at: new Date().toISOString(),
+  };
+  const privacyRow = settings
+    ? {
+        last_seen_visibility: settings.lastSeen,
+        photo_visibility: settings.profilePhoto,
+        phone_visibility: settings.phoneNumber,
+      }
+    : {};
+
+  let { error } = await supabase
+    .from(PROFILE_TABLE)
+    .upsert({ ...baseRow, ...privacyRow }, { onConflict: "email" });
+
+  // Старая схема без колонок приватности: сохраняем профиль без них.
+  if (error && settings) {
+    const retry = await supabase
+      .from(PROFILE_TABLE)
+      .upsert(baseRow, { onConflict: "email" });
+    error = retry.error;
+  }
 
   if (error) throw error;
 }
@@ -92,7 +122,7 @@ export async function findRemoteAccount(
 
   const { data, error } = await supabase
     .from(PROFILE_TABLE)
-    .select("email,username,name,avatar,banner,bio,status,pinned_music,created_at")
+    .select("*")
     .eq("email", normalized)
     .maybeSingle<Record<string, unknown>>();
 
@@ -175,7 +205,7 @@ export async function searchProfiles(
 
   const { data, error } = await supabase
     .from(PROFILE_TABLE)
-    .select("email,username,name,avatar,banner,bio,status,pinned_music")
+    .select("*")
     .ilike("username", `%${q}%`)
     .neq("email", normalizeEmail(excludeEmail))
     .limit(20);
@@ -186,6 +216,10 @@ export async function searchProfiles(
 
 /** Приводит строку `zero_profiles` к виду профиля приложения. */
 export function normalizeProfileRow(row: Record<string, unknown>): ZeroProfile {
+  const visibility = (value: unknown): Visibility | undefined =>
+    value === "all" || value === "contacts" || value === "nobody"
+      ? value
+      : undefined;
   return {
     email: normalizeEmail(String(row.email ?? "")),
     username: normalizeUsername(String(row.username ?? "")),
@@ -195,6 +229,9 @@ export function normalizeProfileRow(row: Record<string, unknown>): ZeroProfile {
     bio: String(row.bio ?? ""),
     status: String(row.status ?? ""),
     pinnedMusic: (row.pinned_music as ZeroProfile["pinnedMusic"]) ?? null,
+    lastSeenVisibility: visibility(row.last_seen_visibility),
+    photoVisibility: visibility(row.photo_visibility),
+    phoneVisibility: visibility(row.phone_visibility),
   };
 }
 
@@ -204,7 +241,7 @@ export async function loadProfile(email: string): Promise<ZeroProfile | null> {
   if (!target) return null;
   const { data, error } = await supabase
     .from(PROFILE_TABLE)
-    .select("email,username,name,avatar,banner,bio,status,pinned_music")
+    .select("*")
     .eq("email", target)
     .maybeSingle<Record<string, unknown>>();
   if (error) throw error;

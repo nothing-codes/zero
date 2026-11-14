@@ -85,9 +85,23 @@ export async function requestPushPermission() {
   }
 }
 
-export function showExternalNotification(title: string, body: string, tag: string) {
+export async function showExternalNotification(title: string, body: string, tag: string) {
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   try {
+    if ("serviceWorker" in navigator) {
+      const registration = await navigator.serviceWorker.getRegistration();
+      if (registration?.showNotification) {
+        await registration.showNotification(title, {
+          body,
+          tag,
+          icon: "/icon-192.png",
+          badge: "/icon-96.png",
+          silent: true,
+          data: { chatId: tag },
+        });
+        return;
+      }
+    }
     const n = new Notification(title, {
       body,
       tag,

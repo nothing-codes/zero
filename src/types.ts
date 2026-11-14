@@ -143,6 +143,8 @@ export interface Message {
   fresh?: boolean;
   edited?: boolean;
   sender?: string;
+  /** Аватар отправителя (для групповых сообщений). */
+  senderAvatar?: string | null;
   reactions?: Reaction[];
   /** Группа/канал, к которому относится сообщение (для маршрутизации). */
   group?: MessageGroupInfo;
@@ -174,6 +176,7 @@ export interface MessageGroupInfo {
   kind: "group" | "channel";
   members: string[];
   ownerEmail?: string;
+  avatar?: string | null;
 }
 
 export interface GroupMember {

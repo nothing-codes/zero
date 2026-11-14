@@ -1,6 +1,6 @@
 import { Loader2, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { normalizeEmail, normalizeUsername, searchProfiles, type ZeroProfile } from "../lib/chat";
+import { normalizeEmail, normalizeUsername, searchProfiles, visibleProfileAvatar, type ZeroProfile } from "../lib/chat";
 import { isZeroIdentity } from "../lib/identity";
 import { useAuthedStore } from "../lib/store";
 import { cn, haptic } from "../lib/utils";
@@ -61,7 +61,7 @@ export function PeoplePicker({
           email: profile.email,
           name: profile.name || profile.username,
           username: profile.username,
-          avatar: profile.avatar,
+          avatar: visibleProfileAvatar(profile),
         }))
       : state.chats
           .filter(

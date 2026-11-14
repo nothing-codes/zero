@@ -1,4 +1,5 @@
 import { supabase } from "./supabase";
+import type { Visibility } from "../types";
 
 /**
  * Онлайн-статусы через Supabase Realtime Presence.
@@ -12,6 +13,7 @@ export interface PresenceEntry {
   at: number;
   name?: string;
   avatar?: string | null;
+  lastSeenVisibility?: Visibility;
 }
 
 type PresenceMap = Record<string, PresenceEntry>;
@@ -21,7 +23,13 @@ function normalizeEmail(value: string) {
 }
 
 export function subscribePresence(
-  me: { email: string; name?: string; username?: string; avatar?: string | null },
+  me: {
+    email: string;
+    name?: string;
+    username?: string;
+    avatar?: string | null;
+    lastSeenVisibility?: Visibility;
+  },
   onChange: (map: PresenceMap) => void,
 ) {
   const email = normalizeEmail(me.email);
@@ -35,7 +43,7 @@ export function subscribePresence(
     if (stopped) return;
     const raw = channel.presenceState() as Record<
       string,
-      Array<{ email?: string; name?: string; avatar?: string | null }>
+      Array<{ email?: string; name?: string; avatar?: string | null; last_seen_visibility?: Visibility }>
     >;
     const map: PresenceMap = {};
     for (const [key, metas] of Object.entries(raw)) {
@@ -43,10 +51,11 @@ export function subscribePresence(
       const handle = normalizeEmail(meta?.email || key);
       if (!handle) continue;
       map[handle] = {
-        online: true,
+        online: meta?.last_seen_visibility !== "nobody",
         at: Date.now(),
         name: meta?.name,
         avatar: meta?.avatar ?? null,
+        lastSeenVisibility: meta?.last_seen_visibility,
       };
     }
     onChange(map);
@@ -65,6 +74,7 @@ export function subscribePresence(
         name: me.name,
         username: me.username,
         avatar: me.avatar ?? null,
+        last_seen_visibility: me.lastSeenVisibility ?? "all",
         online_at: new Date().toISOString(),
       })
       .catch(() => undefined);

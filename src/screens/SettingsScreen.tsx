@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Avatar } from "../components/Avatar";
+import { BannerVisual } from "../components/ProfileBanner";
 import {
   Button,
   IconButton,
@@ -266,12 +267,21 @@ export function SettingsScreen({ onOpenProfile }: { onOpenProfile: () => void })
               </header>
 
               <div className="no-scrollbar min-h-0 flex-1 overflow-y-auto px-5 pb-[122px]">
-                <button type="button" onClick={onOpenProfile} className="press mt-4 flex w-full items-center gap-3 rounded-[18px] border border-foreground/10 bg-card p-4 text-left shadow-[0_18px_40px_-30px_rgba(0,0,0,0.9)]">
-                  <Avatar name={user.name} src={user.avatar} size={56} gradient />
-                  <span className="min-w-0 flex-1">
+                <button type="button" onClick={onOpenProfile} className="press relative mt-4 flex w-full items-center gap-3 overflow-hidden rounded-[18px] border border-foreground/10 bg-card p-4 text-left shadow-[0_18px_40px_-30px_rgba(0,0,0,0.9)]">
+                  <BannerVisual banner={user.banner} className="absolute inset-0" />
+                  <span
+                    aria-hidden
+                    className="pointer-events-none absolute inset-0"
+                    style={{
+                      background:
+                        "linear-gradient(90deg, color-mix(in oklch, var(--card) 82%, transparent) 0%, color-mix(in oklch, var(--card) 38%, transparent) 100%)",
+                    }}
+                  />
+                  <Avatar name={user.name} src={user.avatar} size={56} gradient className="relative z-10" />
+                  <span className="relative z-10 min-w-0 flex-1">
                     <span className="t-body block truncate font-semibold">{user.name}</span>
                   </span>
-                  <ChevronRight size={18} className="text-faint" />
+                  <ChevronRight size={18} className="relative z-10 text-faint" />
                 </button>
 
                 <SectionLabel>Основное</SectionLabel>

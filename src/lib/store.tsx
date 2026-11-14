@@ -235,6 +235,7 @@ function groupInfoOf(chat: Chat): MessageGroupInfo | undefined {
     kind: chat.group.kind ?? "group",
     members: chat.group.memberList?.map((member) => member.email) ?? [],
     ownerEmail: chat.group.ownerEmail,
+    avatar: chat.avatar ?? null,
   };
 }
 
@@ -429,9 +430,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   // Публичный профиль: по нему другие люди находят вас через @username.
   useEffect(() => {
     if (!state.user?.email) return;
-    void upsertProfile(state.user).catch(() => undefined);
+    void upsertProfile(state.user, state.settings).catch(() => undefined);
     migrateLegacyContent(state.user.email);
-  }, [state.user]);
+  }, [state.user, state.settings.lastSeen, state.settings.profilePhoto, state.settings.phoneNumber]);
 
   // Онлайн-статусы в реальном времени. Presence обновляет точку у аватара
   // и «был(а) в сети…» у всех собеседников, а не только после сообщения.
@@ -444,6 +445,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         name: currentUser.name,
         username: currentUser.username,
         avatar: currentUser.avatar,
+        lastSeenVisibility: state.settings.lastSeen,
       },
       (map) => {
         commit((prev) => ({
@@ -452,6 +454,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             if (!chat.email || chat.group || chat.saved) return chat;
             const entry = map[normalizeEmail(chat.email)];
             if (entry) {
+              if (!entry.online) {
+                if (!chat.online && chat.lastSeen === undefined) return chat;
+                return { ...chat, online: false, lastSeen: undefined };
+              }
               if (chat.online && chat.lastSeen) return chat;
               return { ...chat, online: true, lastSeen: Math.max(chat.lastSeen ?? 0, entry.at) };
             }
@@ -462,7 +468,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       },
     );
     return () => session.stop();
-  }, [state.user?.id, state.user?.name, state.user?.username, state.user?.avatar, commit]);
+  }, [state.user?.id, state.user?.name, state.user?.username, state.user?.avatar, state.settings.lastSeen, commit]);
 
   // Активные устройства: регистрируем этот браузер и обновляем heartbeat.
   useEffect(() => {
@@ -576,7 +582,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   );
 
   const receiveMessage = useCallback(
-    (chatId: string, data: SendPayload, meta?: { id?: string; at?: number; sender?: string }) => {
+    (chatId: string, data: SendPayload, meta?: { id?: string; at?: number; sender?: string; avatar?: string | null }) => {
       const chat = stateRef.current.chats.find((c) => c.id === chatId);
       if (!chat) return;
       if (meta?.id && chat.messages.some((message) => message.id === meta.id)) return;
@@ -587,6 +593,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         at: meta?.at ?? Date.now(),
         status: undefined,
         sender: meta?.sender,
+        senderAvatar: meta?.avatar ?? null,
         ...data,
         fresh: true,
         remoteId: meta?.id,
@@ -620,13 +627,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           kind: message.kind,
           at: message.at,
         });
-        if (
-          stateRef.current.settings.push &&
-          typeof document !== "undefined" &&
-          document.hidden
-        ) {
-          showExternalNotification(chat.name, text, chatId);
-        }
+      }
+      if (
+        !chat.muted &&
+        stateRef.current.settings.push &&
+        typeof document !== "undefined" &&
+        (document.hidden || !document.hasFocus())
+      ) {
+        void showExternalNotification(chat.name, previewOf(message), chatId);
       }
     },
     [commit, pushToast],
@@ -1491,6 +1499,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         if (
           list.length !== (existing.group?.memberList ?? []).length ||
           existing.name !== (info.title || existing.name) ||
+          existing.avatar !== (info.avatar ?? existing.avatar) ||
           !existing.remote
         ) {
           commit((prev) => ({
@@ -1500,6 +1509,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 ? {
                     ...chat,
                     name: info.title || chat.name,
+                    avatar: info.avatar !== undefined ? info.avatar : chat.avatar,
                     remote: true,
                     group: {
                       ...chat.group,
@@ -1529,7 +1539,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const chat: Chat = {
         id,
         name: info.title || (info.kind === "channel" ? "Канал" : "Группа"),
-        avatar: null,
+        avatar: info.avatar ?? null,
         unread: 0,
         messages: [],
         remote: true,
@@ -1592,7 +1602,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       } else {
         if (!chat.remote || !chat.email) return;
         try {
-          rows = await loadConversation(myEmail, chat.email);
+          rows = (await loadConversation(myEmail, chat.email)).filter(
+            (row) => !row.payload.group,
+          );
         } catch {
           return;
         }
@@ -1607,6 +1619,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           at: new Date(row.created_at).getTime(),
           status: mine ? (row.read_at ? "read" : "sent") : undefined,
           sender: mine ? undefined : row.sender_name || row.sender_username,
+          senderAvatar: mine ? null : row.sender_avatar ?? null,
           remoteId: row.id,
           ...row.payload,
         };
@@ -1671,6 +1684,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             id: decrypted.id,
             at: new Date(decrypted.created_at).getTime() || Date.now(),
             sender: decrypted.sender_name || decrypted.sender_username || senderEmail,
+            avatar: decrypted.sender_avatar,
           });
         }).catch(() => undefined);
       },
@@ -1819,6 +1833,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 at: new Date(row.created_at).getTime(),
                 remoteId: row.id,
                 sender: row.sender_name || row.sender_username || normalizeEmail(row.sender_email),
+                senderAvatar: row.sender_avatar ?? null,
                 fresh: activeChatRef.current !== chatId,
                 ...row.payload,
               }));

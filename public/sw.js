@@ -1,5 +1,5 @@
 /* Zero offline shell — monochrome, quiet, no tracking. */
-const VERSION = "zero-v1";
+const VERSION = "zero-v2";
 const CORE = [
   "/",
   "/manifest.webmanifest",
@@ -29,6 +29,21 @@ self.addEventListener("activate", (event) => {
         Promise.all(keys.filter((key) => key !== VERSION).map((key) => caches.delete(key))),
       )
       .then(() => self.clients.claim()),
+  );
+});
+
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const chatId = event.notification.data?.chatId || "";
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      const existing = clients.find((client) => client.url.startsWith(self.location.origin));
+      if (existing) {
+        existing.postMessage({ type: "zero-notification-click", chatId });
+        return existing.focus();
+      }
+      return self.clients.openWindow("/");
+    }),
   );
 });
 

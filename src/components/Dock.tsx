@@ -14,10 +14,56 @@ const ITEMS: { id: Tab; label: string; icon: typeof MessageCircle }[] = [
 export function Dock({
   active,
   onChange,
+  variant = "mobile",
 }: {
   active: Tab;
   onChange: (tab: Tab) => void;
+  variant?: "mobile" | "desktop";
 }) {
+  if (variant === "desktop") {
+    return (
+      <div className="shrink-0 border-t border-foreground/8 p-2.5">
+        <nav className="grid grid-cols-4 gap-1 rounded-[20px] border border-foreground/10 bg-[color-mix(in_oklch,var(--card)_90%,transparent)] p-1.5">
+          {ITEMS.map((item) => {
+            const isActive = item.id === active;
+            const Icon = item.icon;
+
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  if (!isActive) haptic(5);
+                  onChange(item.id);
+                }}
+                aria-label={item.label}
+                aria-current={isActive ? "page" : undefined}
+                className={cn(
+                  "relative flex h-[52px] flex-col items-center justify-center gap-1 rounded-[14px] transition-colors duration-200",
+                  isActive ? "text-primary-foreground" : "text-muted-foreground hover:bg-foreground/5 hover:text-foreground",
+                )}
+              >
+                {isActive ? (
+                  <motion.span
+                    layoutId="dock-active-desktop"
+                    transition={{ type: "spring", stiffness: 460, damping: 34, mass: 0.55 }}
+                    className="absolute inset-0 rounded-[14px] bg-primary"
+                  />
+                ) : null}
+                <span className="relative flex flex-col items-center gap-1">
+                  <Icon size={18} strokeWidth={isActive ? 2.1 : 1.7} />
+                  <span className="whitespace-nowrap text-[10.5px] font-medium leading-none tracking-[-0.01em]">
+                    {item.label}
+                  </span>
+                </span>
+              </button>
+            );
+          })}
+        </nav>
+      </div>
+    );
+  }
+
   return (
     <div className="pointer-events-none fixed inset-x-0 bottom-0 z-40 mx-auto flex w-full max-w-[520px] justify-center px-4 pb-[max(14px,env(safe-area-inset-bottom,0px))]">
       <nav className="pointer-events-auto flex items-center justify-center gap-1 rounded-[24px] border border-foreground/10 bg-[color-mix(in_oklch,var(--card)_90%,transparent)] p-1.5 shadow-[0_20px_50px_-16px_rgba(0,0,0,0.8),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-2xl">

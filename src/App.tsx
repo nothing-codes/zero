@@ -7,6 +7,7 @@ import { callRoom, slug, subscribeCall, type IncomingCall } from "./lib/rtc";
 import { isZeroIdentity } from "./lib/identity";
 import { supabase } from "./lib/supabase";
 import { useStore } from "./lib/store";
+import { useIsDesktop } from "./lib/useIsDesktop";
 import { cn, haptic } from "./lib/utils";
 import { AuthFlow } from "./screens/Auth";
 import { CallsScreen } from "./screens/CallsScreen";
@@ -23,6 +24,7 @@ const TABS: Tab[] = ["chats", "contacts", "calls", "settings"];
 
 export function App() {
   const { state, user, openOrCreateChat } = useStore();
+  const isDesktop = useIsDesktop();
   const [tab, setTab] = useState<Tab>("chats");
   const [overlay, setOverlay] = useState<Overlay>(null);
   const [call, setCall] = useState<ActiveCall>(null);
@@ -37,6 +39,8 @@ export function App() {
   overlayRef.current = overlay;
   const tabRef = useRef<Tab>("chats");
   tabRef.current = tab;
+  const desktopRef = useRef(isDesktop);
+  desktopRef.current = isDesktop;
   const uiEntries = useRef(0);
   const suppressPop = useRef(0);
 
@@ -71,7 +75,7 @@ export function App() {
 
   const openOverlay = useCallback(
     (next: Overlay) => {
-      pushUiEntry();
+      if (!desktopRef.current) pushUiEntry();
       setOverlay(next);
     },
     [pushUiEntry],
@@ -79,7 +83,7 @@ export function App() {
 
   const closeOverlay = useCallback(() => {
     setOverlay(null);
-    exitUi();
+    if (!desktopRef.current) exitUi();
   }, [exitUi]);
 
   const openCall = useCallback(
@@ -103,6 +107,10 @@ export function App() {
       const fromRoot = tabRef.current === "chats";
       const toRoot = next === "chats";
       setTab(next);
+      if (desktopRef.current) {
+        if (overlayRef.current) setOverlay(null);
+        return;
+      }
       if (fromRoot && !toRoot) pushUiEntry();
       else if (!fromRoot && toRoot) exitUi();
     },
@@ -156,6 +164,17 @@ export function App() {
   }, [user]);
 
   useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const onMessage = (event: MessageEvent) => {
+      const data = event.data as { type?: string; chatId?: string } | null;
+      if (data?.type !== "zero-notification-click" || !data.chatId) return;
+      openOverlay({ type: "chat", chatId: data.chatId });
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", onMessage);
+  }, [openOverlay]);
+
+  useEffect(() => {
     // Пока звонок открыт, его канал обслуживает CallOverlay — второй
     // подписчик на ту же тему только мешает сигналингу.
     if (!user || call) return;
@@ -198,6 +217,11 @@ export function App() {
 
   const openChat = (chatId: string) => {
     haptic(4);
+    if (desktopRef.current) {
+      setTab("chats");
+      setOverlay({ type: "chat", chatId });
+      return;
+    }
     openOverlay({ type: "chat", chatId });
   };
 
@@ -205,6 +229,7 @@ export function App() {
   // вернёт в список чатов.
   const switchChat = useCallback((chatId: string) => {
     haptic(4);
+    if (desktopRef.current) setTab("chats");
     setOverlay({ type: "chat", chatId });
   }, []);
 
@@ -217,69 +242,105 @@ export function App() {
   }
 
   const dockHidden = Boolean(overlay) || Boolean(call);
+  const activeChatId = overlay?.type === "chat" ? overlay.chatId : null;
 
   return (
-    <Frame>
-      <div className="relative flex min-h-0 flex-1 flex-col">
-        {TABS.map((item) => {
-          const active = tab === item;
-          return (
-            <div
-              key={item}
-              aria-hidden={!active}
-              inert={!active}
-              className={cn(
-                "absolute inset-0 transition-opacity duration-200",
-                active ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0",
-              )}
-            >
-              {item === "chats" ? (
-                <ChatsScreen onOpenChat={openChat} />
-              ) : null}
-              {item === "contacts" ? (
-                <ContactsScreen onOpenChat={openChat} onCall={openCall} />
-              ) : null}
-              {item === "calls" ? (
-                <CallsScreen onCall={openCall} />
-              ) : null}
-              {item === "settings" ? (
-                <SettingsScreen onOpenProfile={() => openOverlay({ type: "profile" })} />
-              ) : null}
+    <Frame desktop={isDesktop}>
+      {isDesktop ? (
+        <div className="flex min-h-0 flex-1">
+          <aside className="flex w-[380px] shrink-0 flex-col border-r border-foreground/8 bg-background">
+            <div className="relative min-h-0 flex-1">
+              <ChatsScreen onOpenChat={openChat} desktop activeChatId={activeChatId} />
             </div>
-          );
-        })}
-      </div>
+            <Dock active={tab} onChange={changeTab} variant="desktop" />
+          </aside>
 
-      {!dockHidden ? (
-        <Dock active={tab} onChange={changeTab} />
-      ) : null}
-
-      <AnimatePresence>
-        {overlay ? (
-          <motion.div
-            key={overlay.type === "chat" ? `chat-${overlay.chatId}` : "profile"}
-            initial={{ x: "100%" }}
-            animate={{ x: 0 }}
-            exit={{ x: "100%" }}
-            transition={{ type: "spring", stiffness: 380, damping: 38, mass: 0.7 }}
-            className="absolute inset-0 z-50 overflow-hidden bg-background"
-          >
-            {overlay.type === "chat" ? (
+          <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-background">
+            {overlay?.type === "chat" ? (
               <ChatScreen
                 chatId={overlay.chatId}
                 onBack={closeOverlay}
                 onCall={() => openCall(overlay.chatId)}
                 onOpenChat={switchChat}
+                desktop
               />
+            ) : overlay?.type === "profile" ? (
+              <ProfileScreen onBack={closeOverlay} onOpenSettings={closeOverlay} />
+            ) : tab === "contacts" ? (
+              <ContactsScreen onOpenChat={openChat} onCall={openCall} />
+            ) : tab === "calls" ? (
+              <CallsScreen onCall={openCall} />
+            ) : tab === "settings" ? (
+              <SettingsScreen onOpenProfile={() => openOverlay({ type: "profile" })} />
             ) : (
-              <ProfileScreen
-                onBack={closeOverlay}
-                onOpenSettings={closeOverlay}
-              />
+              <ChatPlaceholder />
             )}
-          </motion.div>
-        ) : null}
-      </AnimatePresence>
+          </main>
+        </div>
+      ) : (
+        <>
+          <div className="relative flex min-h-0 flex-1 flex-col">
+            {TABS.map((item) => {
+              const active = tab === item;
+              return (
+                <div
+                  key={item}
+                  aria-hidden={!active}
+                  inert={!active}
+                  className={cn(
+                    "absolute inset-0 transition-opacity duration-200",
+                    active ? "z-10 opacity-100" : "pointer-events-none z-0 opacity-0",
+                  )}
+                >
+                  {item === "chats" ? (
+                    <ChatsScreen onOpenChat={openChat} />
+                  ) : null}
+                  {item === "contacts" ? (
+                    <ContactsScreen onOpenChat={openChat} onCall={openCall} />
+                  ) : null}
+                  {item === "calls" ? (
+                    <CallsScreen onCall={openCall} />
+                  ) : null}
+                  {item === "settings" ? (
+                    <SettingsScreen onOpenProfile={() => openOverlay({ type: "profile" })} />
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+
+          {!dockHidden ? (
+            <Dock active={tab} onChange={changeTab} />
+          ) : null}
+
+          <AnimatePresence>
+            {overlay ? (
+              <motion.div
+                key={overlay.type === "chat" ? `chat-${overlay.chatId}` : "profile"}
+                initial={{ x: "100%" }}
+                animate={{ x: 0 }}
+                exit={{ x: "100%" }}
+                transition={{ type: "spring", stiffness: 380, damping: 38, mass: 0.7 }}
+                className="absolute inset-0 z-50 overflow-hidden bg-background"
+              >
+                {overlay.type === "chat" ? (
+                  <ChatScreen
+                    chatId={overlay.chatId}
+                    onBack={closeOverlay}
+                    onCall={() => openCall(overlay.chatId)}
+                    onOpenChat={switchChat}
+                  />
+                ) : (
+                  <ProfileScreen
+                    onBack={closeOverlay}
+                    onOpenSettings={closeOverlay}
+                  />
+                )}
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
+        </>
+      )}
 
       <AnimatePresence>
         {call ? (
@@ -311,7 +372,16 @@ export function App() {
   );
 }
 
-function Frame({ children }: { children: ReactNode }) {
+function ChatPlaceholder() {
+  return (
+    <div className="chat-canvas flex h-full flex-col items-center justify-center gap-5 px-8 text-center">
+      <img src="/logo.png" alt="Zero" className="h-20 w-auto object-contain opacity-30" />
+      <p className="t-sub text-faint">Выберите чат</p>
+    </div>
+  );
+}
+
+function Frame({ children, desktop = false }: { children: ReactNode; desktop?: boolean }) {
   // На iOS клавиатура не меняет layout viewport — подгоняем высоту под
   // visualViewport, чтобы поле ввода и нижние меню не прятались под ней.
   const [viewportHeight, setViewportHeight] = useState<number | null>(null);
@@ -334,7 +404,14 @@ function Frame({ children }: { children: ReactNode }) {
       className="flex min-h-0 w-full justify-center overflow-hidden bg-shell"
       style={{ height: viewportHeight ? `${viewportHeight}px` : "100dvh" }}
     >
-      <div className="relative flex h-full min-h-0 w-full max-w-[520px] flex-col overflow-hidden bg-background shadow-[0_0_0_1px_rgba(255,255,255,0.04)] sm:border-x sm:border-foreground/8">
+      <div
+        className={cn(
+          "relative flex h-full min-h-0 w-full flex-col overflow-hidden bg-background",
+          desktop
+            ? "max-w-none"
+            : "max-w-[520px] shadow-[0_0_0_1px_rgba(255,255,255,0.04)] sm:border-x sm:border-foreground/8",
+        )}
+      >
         {children}
       </div>
     </div>

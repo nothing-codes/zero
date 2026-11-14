@@ -1,4 +1,4 @@
-import { Music2, Pause, Play, X } from "lucide-react";
+import { Pause, Play, X } from "lucide-react";
 import { useRef, useState, type MouseEvent } from "react";
 import { useMediaSrc } from "../lib/useMediaSrc";
 import { cn, duration, fileSize, haptic, trackMeta } from "../lib/utils";
@@ -80,18 +80,15 @@ function TrackPlayer({
         className="relative grid shrink-0 place-items-center overflow-hidden rounded-[11px] text-white/85 shadow-inner"
         style={{ width: artwork, height: artwork, ...coverStyle(title) }}
       >
-        <Music2 size={compact ? 18 : 21} strokeWidth={1.6} />
-        {playing ? (
-          <span className="absolute inset-x-1.5 bottom-1 flex h-2.5 items-end justify-center gap-[2px]">
-            {[0, 1, 2].map((index) => (
-              <span
-                key={index}
-                className="eq-bar w-[2px] rounded-full bg-white/80"
-                style={{ height: "100%", animationDelay: `${index * 0.14}s` }}
-              />
-            ))}
-          </span>
-        ) : null}
+        <span className="flex h-[18px] items-center justify-center gap-[3px]">
+          {[0, 1, 2].map((index) => (
+            <span
+              key={index}
+              className="eq-bar h-full w-[3px] rounded-full bg-white/85"
+              style={{ animationDelay: `${index * 0.14}s` }}
+            />
+          ))}
+        </span>
       </div>
 
       <div className="min-w-0 flex-1">
@@ -193,7 +190,7 @@ export function PinnedMusicPlayer({
   return (
     <div className="rounded-[18px] border border-foreground/8 bg-foreground/[0.03] p-3.5">
       <div className="mb-2.5 flex items-center justify-between">
-        <span className="t-cap text-faint">Закреплённая музыка</span>
+        <span className="t-sub text-faint">Закреплённая музыка</span>
         {onRemove ? (
           <button
             type="button"

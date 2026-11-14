@@ -1,11 +1,11 @@
 import { AnimatePresence, motion } from "motion/react";
-import { BadgeCheck, Bookmark, CheckCheck, Loader2, Megaphone, MessageCircle, Pin, Plus, Search, Trash2, Users, X } from "lucide-react";
+import { BadgeCheck, CheckCheck, Loader2, Megaphone, MessageCircle, Pin, Plus, Search, Trash2, Users, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { CreateGroup } from "../components/CreateGroup";
-import { Avatar } from "../components/Avatar";
+import { Avatar, SavedAvatar } from "../components/Avatar";
 import { ContactPicker } from "../components/ContactPicker";
 import { ChatListSkeleton, ContextMenu, SettingsRow, Sheet, useDelayedFlag } from "../components/ui";
-import { normalizeEmail, searchProfiles, type ZeroProfile } from "../lib/chat";
+import { normalizeEmail, searchProfiles, visibleProfileAvatar, type ZeroProfile } from "../lib/chat";
 import type { Contact } from "../lib/data";
 import { isZeroIdentity } from "../lib/identity";
 import { chatPreview, useAuthedStore } from "../lib/store";
@@ -24,8 +24,8 @@ function TypingDots() {
   );
 }
 
-function ChatRow({ chat, open, onOpen, onClose, onChat, onMenu, onReadAll }: {
-  chat: Chat; open: boolean; onOpen: () => void; onClose: () => void; onChat: () => void; onMenu: (x: number, y: number) => void; onReadAll: () => void;
+function ChatRow({ chat, open, selected, onOpen, onClose, onChat, onMenu, onReadAll }: {
+  chat: Chat; open: boolean; selected?: boolean; onOpen: () => void; onClose: () => void; onChat: () => void; onMenu: (x: number, y: number) => void; onReadAll: () => void;
 }) {
   const last = chat.messages[chat.messages.length - 1];
   const fresh = Boolean(last?.fresh) || chat.unread > 0;
@@ -79,7 +79,14 @@ function ChatRow({ chat, open, onOpen, onClose, onChat, onMenu, onReadAll }: {
         animate={{ x: open ? -SWIPE_WIDTH : 0 }}
         transition={{ type: "spring", stiffness: 480, damping: 40, mass: 0.6 }}
         onDragEnd={(_, info) => { if (info.offset.x < -52 || info.velocity.x < -450) onOpen(); else onClose(); }}
-        className={cn("relative z-10 transition-colors duration-500", fresh ? "bg-[color-mix(in_oklch,var(--foreground)_3%,var(--background))]" : "bg-background")}
+        className={cn(
+          "relative z-10 transition-colors duration-300",
+          selected
+            ? "bg-foreground/[0.075]"
+            : fresh
+              ? "bg-[color-mix(in_oklch,var(--foreground)_3%,var(--background))]"
+              : "bg-background",
+        )}
       >
         <button
           type="button"
@@ -95,13 +102,14 @@ function ChatRow({ chat, open, onOpen, onClose, onChat, onMenu, onReadAll }: {
           onPointerLeave={clearPress}
           onPointerMove={onPointerMove}
           onContextMenu={(event) => { event.preventDefault(); onMenu(event.clientX, event.clientY); }}
-          className="flex w-full items-center gap-3 px-5 py-3.5 text-left"
+          className={cn(
+            "flex w-full items-center gap-3 px-5 py-3.5 text-left transition-colors duration-150",
+            selected ? "" : "hover:bg-foreground/[0.035]",
+          )}
         >
           <span className="relative">
             {chat.saved ? (
-              <span className="grid size-14 place-items-center rounded-full bg-foreground/8 text-foreground/75">
-                <Bookmark size={22} fill="currentColor" strokeWidth={1.6} />
-              </span>
+              <SavedAvatar size={56} />
             ) : (
               <Avatar name={chat.name} src={chat.avatar} size={56} online={chat.online} />
             )}
@@ -131,7 +139,11 @@ function ChatRow({ chat, open, onOpen, onClose, onChat, onMenu, onReadAll }: {
   );
 }
 
-export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => void; }) {
+export function ChatsScreen({ onOpenChat, desktop = false, activeChatId = null }: {
+  onOpenChat: (chatId: string) => void;
+  desktop?: boolean;
+  activeChatId?: string | null;
+}) {
   const { state, user, togglePinChat, deleteChat, restoreChat, openOrCreateChat, createGroup, markRead, markAllRead } = useAuthedStore();
   const ready = useDelayedFlag(300);
   const [query, setQuery] = useState("");
@@ -243,7 +255,7 @@ export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => vo
       name: profile.name || profile.username,
       username: profile.username,
       email: profile.email,
-      avatar: profile.avatar,
+      avatar: visibleProfileAvatar(profile),
       remote: Boolean(profile.email),
     });
     onOpenChat(id);
@@ -284,7 +296,7 @@ export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => vo
         </div>
       </header>
 
-      <div className="no-scrollbar relative min-h-0 flex-1 overflow-y-auto overscroll-contain pb-[122px]">
+      <div className={cn("no-scrollbar relative min-h-0 flex-1 overflow-y-auto overscroll-contain", desktop ? "pb-6" : "pb-[122px]")}>
         {!ready ? <ChatListSkeleton /> : sorted.length === 0 && peopleFiltered.length === 0 && !peopleLoading ? (
           <div className="flex h-full flex-col items-center justify-center px-8 pb-20 text-center">
             <div className="relative mb-6"><img src="/logo.png" alt="Zero" className="h-24 w-auto object-contain opacity-50" /></div>
@@ -300,7 +312,7 @@ export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => vo
                   <span className="t-cap text-faint">Закреплённые</span>
                 </div>
                 {pinned.map((chat) => (
-                  <ChatRow key={chat.id} chat={chat} open={openRow === chat.id} onOpen={() => setOpenRow(chat.id)} onClose={() => setOpenRow((c) => (c === chat.id ? null : c))} onChat={() => onOpenChat(chat.id)} onMenu={(x, y) => openMenu(chat, x, y)} onReadAll={markAllRead} />
+                  <ChatRow key={chat.id} chat={chat} open={openRow === chat.id} selected={desktop && activeChatId === chat.id} onOpen={() => setOpenRow(chat.id)} onClose={() => setOpenRow((c) => (c === chat.id ? null : c))} onChat={() => onOpenChat(chat.id)} onMenu={(x, y) => openMenu(chat, x, y)} onReadAll={markAllRead} />
                 ))}
               </div>
             ) : null}
@@ -311,7 +323,7 @@ export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => vo
                   <span className="t-cap text-faint">{searching ? `Чаты · ${sorted.length}` : "Все чаты"}</span>
                 </div>
                 {regular.map((chat) => (
-                  <ChatRow key={chat.id} chat={chat} open={openRow === chat.id} onOpen={() => setOpenRow(chat.id)} onClose={() => setOpenRow((c) => (c === chat.id ? null : c))} onChat={() => onOpenChat(chat.id)} onMenu={(x, y) => openMenu(chat, x, y)} onReadAll={markAllRead} />
+                  <ChatRow key={chat.id} chat={chat} open={openRow === chat.id} selected={desktop && activeChatId === chat.id} onOpen={() => setOpenRow(chat.id)} onClose={() => setOpenRow((c) => (c === chat.id ? null : c))} onChat={() => onOpenChat(chat.id)} onMenu={(x, y) => openMenu(chat, x, y)} onReadAll={markAllRead} />
                 ))}
               </div>
             ) : null}
@@ -329,7 +341,7 @@ export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => vo
                     onClick={() => openProfile(profile)}
                     className="flex w-full items-center gap-3 px-5 py-2.5 text-left transition-colors hover:bg-foreground/5"
                   >
-                    <Avatar name={profile.name || profile.username} src={profile.avatar} size={46} />
+                    <Avatar name={profile.name || profile.username} src={visibleProfileAvatar(profile)} size={46} />
                     <span className="min-w-0 flex-1">
                       <span className="t-body block truncate font-medium">{profile.name || profile.username}</span>
                       <span className="t-sub block truncate text-faint">@{profile.username}</span>
@@ -348,14 +360,14 @@ export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => vo
         )}
       </div>
 
-      <motion.button type="button" whileTap={{ scale: 0.9 }} onClick={() => setPlusOpen(true)} aria-label="Создать" className="absolute bottom-[92px] right-5 z-30 grid size-12 place-items-center rounded-full bg-primary text-primary-foreground shadow-[0_8px_26px_rgba(0,0,0,0.45)]">
+      <motion.button type="button" whileTap={{ scale: 0.9 }} onClick={() => setPlusOpen(true)} aria-label="Создать" className={cn("absolute z-30 grid size-12 place-items-center rounded-full bg-primary text-primary-foreground shadow-[0_8px_26px_rgba(0,0,0,0.45)]", desktop ? "bottom-5 right-5" : "bottom-[92px] right-5")}>
         <Plus size={20} />
       </motion.button>
 
       <ContactPicker open={picker} onClose={() => setPicker(false)} onPick={pick} title="Новый чат" />
 
       <Sheet open={plusOpen} onClose={() => setPlusOpen(false)} title="Создать">
-        <div className="overflow-hidden rounded-[16px] border border-foreground/8 bg-foreground/[0.02] px-3 pb-1">
+        <div className="overflow-hidden rounded-[16px] bg-foreground/[0.02] px-3 pb-1">
           <SettingsRow icon={<MessageCircle size={16} />} label="Новый чат" hint="Личная переписка" onClick={() => { setPlusOpen(false); window.setTimeout(() => setPicker(true), 120); }} />
           <SettingsRow icon={<Users size={16} />} label="Новая группа" hint="Общение нескольких людей" onClick={() => { setPlusOpen(false); window.setTimeout(() => setCreateKind("group"), 120); }} />
           <SettingsRow icon={<Megaphone size={16} />} label="Новый канал" hint="Публикации для подписчиков" last onClick={() => { setPlusOpen(false); window.setTimeout(() => setCreateKind("channel"), 120); }} />
@@ -387,7 +399,7 @@ export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => vo
 
       <AnimatePresence>
         {deleted && undoVisible ? (
-          <motion.div initial={{ y: 24, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 16, opacity: 0 }} transition={{ type: "spring", stiffness: 460, damping: 36 }} className="pointer-events-none absolute inset-x-0 bottom-[92px] z-40 flex justify-center px-5">
+          <motion.div initial={{ y: 24, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 16, opacity: 0 }} transition={{ type: "spring", stiffness: 460, damping: 36 }} className={cn("pointer-events-none absolute inset-x-0 z-40 flex justify-center px-5", desktop ? "bottom-5" : "bottom-[92px]")}>
             <div className="pointer-events-auto flex w-full max-w-[360px] items-center gap-3 rounded-[16px] border border-foreground/10 bg-card/95 py-2.5 pl-4 pr-2.5 shadow-2xl backdrop-blur-xl">
               <span className="t-sub min-w-0 flex-1 truncate text-muted-foreground">Чат с {deleted.name} удалён</span>
               <button type="button" onClick={() => { restoreChat(deleted); setDeleted(null); setUndoVisible(false); haptic(6); }} className="press t-sub rounded-[10px] px-3 py-1.5 font-semibold text-foreground hover:bg-foreground/8">Отменить</button>

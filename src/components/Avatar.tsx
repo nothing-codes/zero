@@ -1,3 +1,5 @@
+import { AnimatePresence, motion } from "motion/react";
+import { Bookmark } from "lucide-react";
 import { useState } from "react";
 import { cn, initials } from "../lib/utils";
 
@@ -8,18 +10,34 @@ export function PresenceDot({
   online?: boolean;
   className?: string;
 }) {
-  // Точка показывается только у людей в сети и всегда серая — как в шапке
-  // приложения. У офлайн-собеседников никакого кружка нет.
-  if (!online) return null;
+  // Точка появляется и исчезает плавно, без мигающего ореола.
+  return (
+    <AnimatePresence>
+      {online ? (
+        <motion.span
+          aria-hidden
+          initial={{ scale: 0.3, opacity: 0 }}
+          animate={{ scale: 1, opacity: 1 }}
+          exit={{ scale: 0.3, opacity: 0 }}
+          transition={{ type: "spring", stiffness: 520, damping: 30, mass: 0.5 }}
+          className={cn(
+            "pointer-events-none absolute -right-0.5 -bottom-0.5 z-20 block size-[15px] rounded-full border-[2.5px] border-background bg-[#8e8e93]",
+            className,
+          )}
+        />
+      ) : null}
+    </AnimatePresence>
+  );
+}
+
+/** Единая иконка «Избранное» для списка чатов, шапки и карточки профиля. */
+export function SavedAvatar({ size = 56 }: { size?: number }) {
   return (
     <span
-      aria-hidden
-      className={cn(
-        "presence-dot pointer-events-none absolute -right-0.5 -bottom-0.5 z-20 grid size-[15px] place-items-center rounded-full border-[2.5px] border-background bg-foreground/45",
-        className,
-      )}
+      className="grid shrink-0 place-items-center rounded-full bg-foreground/8 text-foreground/75"
+      style={{ width: size, height: size }}
     >
-      <span className="presence-pulse absolute inset-0 rounded-full" />
+      <Bookmark size={Math.round(size * 0.4)} fill="currentColor" strokeWidth={1.6} />
     </span>
   );
 }

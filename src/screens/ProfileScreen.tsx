@@ -58,10 +58,10 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
 
   return (
     <div className="relative flex h-full flex-col bg-background">
-      <header className="relative z-10 flex shrink-0 items-center justify-between px-3 pt-[max(10px,env(safe-area-inset-top,0px))]">
-        <IconButton label="Назад" onClick={onBack}><ArrowLeft size={20} /></IconButton>
-        <span className="t-cap text-faint">Профиль</span>
-        <IconButton label="Поделиться" onClick={async () => {
+      <header className="absolute inset-x-0 top-0 z-20 flex shrink-0 items-center justify-between px-3 pt-[max(10px,env(safe-area-inset-top,0px))]">
+        <IconButton label="Назад" onClick={onBack} className="text-white/85"><ArrowLeft size={20} /></IconButton>
+        <span className="t-cap text-white/70 drop-shadow">Профиль</span>
+        <IconButton label="Поделиться" className="text-white/85" onClick={async () => {
           haptic(6);
           const ok = await shareText(`@${user.username} в Zero — ${appLink()}`);
           setShared(ok);
@@ -77,7 +77,7 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
             type="button"
             onClick={() => bannerRef.current?.click()}
             aria-label="Изменить фон профиля"
-            className="relative block h-[178px] w-full overflow-hidden rounded-b-[28px] text-left"
+            className="relative block h-[210px] w-full overflow-hidden rounded-b-[28px] text-left"
           >
             <BannerVisual banner={user.banner} />
             {/* Плавное растворение фона снизу вверх — без тяжёлой чёрной плашки. */}
@@ -89,7 +89,7 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
                   "linear-gradient(to top, var(--background) 0%, color-mix(in oklch, var(--background) 52%, transparent) 22%, transparent 64%)",
               }}
             />
-            <span className="pointer-events-none absolute right-4 top-4 grid size-8 place-items-center rounded-full bg-black/25 text-white/80 backdrop-blur-md">
+            <span className="pointer-events-none absolute right-4 top-[calc(env(safe-area-inset-top,0px)+54px)] grid size-8 place-items-center rounded-full bg-black/25 text-white/80 backdrop-blur-md">
               <Camera size={14} />
             </span>
           </button>

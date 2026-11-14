@@ -1,11 +1,11 @@
 import { AnimatePresence, animate, motion, useMotionValue, useTransform } from "motion/react";
 import {
-  ArrowDown, ArrowLeft, BadgeCheck, Ban, BarChart3, Bookmark, Camera, Check, CheckCheck, ChevronDown, ChevronUp, Clock3, Copy, Download, Eraser, FileArchive, FileAudio, FileImage, FileSpreadsheet, FileText, FileVideo, File as FileIcon, Forward, Image as ImageIcon, Loader2, Mail, Megaphone, Mic, MoreVertical, Music2, Paperclip, Pause, Pencil, Phone, Pin, Play, Plus, Reply, Search, Send, Sticker, Trash2, UserPlus, Users, Video, X,
+  ArrowDown, ArrowLeft, BadgeCheck, Ban, BarChart3, Camera, Check, CheckCheck, ChevronDown, ChevronUp, Clock3, Copy, Download, Eraser, FileArchive, FileAudio, FileImage, FileSpreadsheet, FileText, FileVideo, File as FileIcon, Forward, Image as ImageIcon, Loader2, Mail, Megaphone, Mic, MoreVertical, Music2, Paperclip, Pause, Pencil, Phone, Pin, Play, Plus, Reply, Search, Send, Sticker, Trash2, UserPlus, Users, Video, X,
 } from "lucide-react";
 import {
   Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject,
 } from "react";
-import { Avatar } from "../components/Avatar";
+import { Avatar, SavedAvatar } from "../components/Avatar";
 import { ContactPicker } from "../components/ContactPicker";
 import { MapArt } from "../components/media";
 import { MusicBubble, PinnedMusicPlayer } from "../components/Music";
@@ -16,7 +16,7 @@ import { Button, ContextMenu, IconButton, Sheet, SettingsRow } from "../componen
 import {
   downloadFileBlob, pickZeroDirectory, saveImageToGallery, triggerBlobDownload, uploadFileToCloud, writeBlobToDirectory,
 } from "../lib/files";
-import { loadProfile, normalizeEmail, normalizeUsername, searchProfiles, type ZeroProfile } from "../lib/chat";
+import { loadProfile, normalizeEmail, normalizeUsername, searchProfiles, visibleProfileAvatar, type ZeroProfile } from "../lib/chat";
 import { decryptBlob } from "../lib/e2ee";
 import { isZeroIdentity } from "../lib/identity";
 import { useMediaSrc } from "../lib/useMediaSrc";
@@ -568,6 +568,16 @@ function MessageBubble({
   const mine = message.fromMe;
   const photoSrc = useMediaSrc(message.photo?.src, message.photo?.enc);
   const isGroup = Boolean(chat.group);
+  const senderMember = !mine && isGroup
+    ? chat.group?.memberList?.find(
+        (member) =>
+          (message.sender && member.name === message.sender) ||
+          (member.username &&
+            message.sender &&
+            normalizeUsername(member.username) === normalizeUsername(message.sender)),
+      )
+    : undefined;
+  const senderAvatar = message.senderAvatar ?? senderMember?.avatar ?? null;
   const timeGap = (a?: Message, b?: Message) => (a && b ? Math.abs(a.at - b.at) < 5 * 60_000 : false);
   const sameAsPrev = Boolean(prev && prev.fromMe === message.fromMe && prev.sender === message.sender && timeGap(prev, message));
   const sameAsNext = Boolean(next && next.fromMe === message.fromMe && next.sender === message.sender && timeGap(message, next));
@@ -726,7 +736,7 @@ function MessageBubble({
 
   return (
     <motion.div layout initial={{ opacity: 0, y: 15, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ type: "spring", stiffness: 400, damping: 25 }} id={`msg-${message.id}`} className={cn("group flex w-full gap-2", mine ? "justify-end" : "justify-start", sameAsPrev ? "mt-[3px]" : "mt-2.5", searchDimmed && "opacity-25")} onPointerDown={onPointerDown} onPointerUp={onPointerUp} onPointerLeave={clearPress} onPointerCancel={resetSwipe} onPointerMove={onPointerMove} onContextMenu={(e) => { e.preventDefault(); onMenu(message, e.clientX, e.clientY); }} style={{ filter: searchDimmed ? "grayscale(1)" : undefined, touchAction: "pan-y" }}>
-      {!mine && isGroup ? <div className="w-6 shrink-0 self-end">{!sameAsNext ? <Avatar name={message.sender ?? chat.name} size={24} /> : null}</div> : null}
+      {!mine && isGroup ? <div className="w-[30px] shrink-0 self-end">{!sameAsNext ? <Avatar name={message.sender ?? chat.name} src={senderAvatar} size={28} /> : null}</div> : null}
       <div className={cn("flex min-w-0 max-w-[82%] flex-col", mine ? "items-end" : "items-start")}>
         {!mine && isGroup && !sameAsPrev ? <span className="t-cap mb-1 pl-1 text-faint">{message.sender ?? chat.name}</span> : null}
         <div className={cn("relative", activeMatch && "rounded-[22px] ring-1 ring-foreground/60 ring-offset-2 ring-offset-background", flash && "msg-new rounded-[22px]")}>
@@ -831,7 +841,7 @@ function RecordingOverlay({ kind, elapsed, cancelled, videoRef, hasStream, level
   );
 }
 
-function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: () => void; onCall: () => void; onOpenChat: (chatId: string) => void; }) {
+function ChatRoom({ chat, onBack, onCall, onOpenChat, desktop = false }: { chat: Chat; onBack: () => void; onCall: () => void; onOpenChat: (chatId: string) => void; desktop?: boolean; }) {
   const { state, user, sendMessage, setMessageMediaSource, deleteMessage, editMessage, pinMessage, votePoll, forwardMessage, setDraft, markRead, setActiveChat, openOrCreateChat, clearMessages, loadChatHistory, blockChat, updateProfile, updateGroup, addGroupMembers, removeGroupMember, deleteChat, syncPollVotes } = useAuthedStore();
   const isZero = isZeroIdentity(chat);
   const isSaved = Boolean(chat.saved);
@@ -1808,9 +1818,9 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
     <div className="chat-canvas relative flex h-full flex-col overflow-hidden">
       <header className="relative z-30 shrink-0 border-b border-foreground/6 glass">
         <div className="flex h-[68px] items-center gap-1 px-2 pt-[env(safe-area-inset-top,0px)]">
-          <IconButton label="Назад" onClick={onBack} className="size-9"><ArrowLeft size={20} /></IconButton>
+          {desktop ? null : <IconButton label="Назад" onClick={onBack} className="size-9"><ArrowLeft size={20} /></IconButton>}
           <button type="button" onClick={() => setProfileOpen(true)} aria-label="Профиль" className="flex min-w-0 flex-1 items-center gap-3 rounded-[14px] py-1 pl-0.5 pr-1 text-left transition-colors active:bg-foreground/5">
-            <Avatar name={chat.name} src={chat.avatar} size={44} online={chat.online} />
+            {isSaved ? <SavedAvatar size={44} /> : <Avatar name={chat.name} src={chat.avatar} size={44} online={chat.online} />}
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-1.5 truncate text-[17px] font-semibold leading-tight">
                 <span className="truncate">{chat.name}</span>
@@ -1909,10 +1919,10 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
         onTouchStart={cancelScroll}
         className="no-scrollbar relative min-h-0 flex-1 overflow-y-auto overscroll-contain px-4"
       >
-        <div className="mx-auto flex min-h-full w-full max-w-[520px] flex-col justify-end pb-2 pt-4">
+        <div className={cn("mx-auto flex min-h-full w-full flex-col justify-end pb-2 pt-4", desktop ? "max-w-[760px]" : "max-w-[520px]")}>
           {messages.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center py-16 text-center">
-              <Avatar name={chat.name} src={chat.avatar} size={76} liquid />
+              {isSaved ? <SavedAvatar size={76} /> : <Avatar name={chat.name} src={chat.avatar} size={76} liquid />}
               <p className="t-h mt-5">{chat.name}</p>
               <p className="t-sub mt-2 max-w-[240px] text-faint">Ноль сообщений. Напишите первым.</p>
             </div>
@@ -1950,6 +1960,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
       </AnimatePresence>
 
       <div className="relative z-20 shrink-0 border-t border-foreground/8 bg-background/95 pb-[max(8px,env(safe-area-inset-bottom,0px))] pl-2 pr-2 backdrop-blur-xl">
+        <div className={cn("relative mx-auto w-full", desktop && "max-w-[760px]")}>
         <AnimatePresence>
           {mention && mentionOptions.length > 0 ? (
             <motion.div
@@ -2063,7 +2074,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
                   type="button"
                   onClick={() => { setMention(null); setStickerOpen(true); haptic(4); }}
                   aria-label="Стикеры"
-                  className="mb-[5px] mr-[5px] grid size-[30px] shrink-0 place-items-center rounded-full bg-[#1c1c1e] text-white/80 shadow-[inset_0_1px_0_rgba(255,255,255,0.09)] transition-[transform,color,background-color] duration-200 hover:bg-[#26262a] hover:text-white active:scale-90"
+                  className="mb-2 mr-[5px] grid size-[30px] shrink-0 place-items-center rounded-full bg-transparent text-foreground/60 transition-[transform,color] duration-200 hover:text-foreground active:scale-90"
                 >
                   <Sticker size={17} strokeWidth={1.7} />
                 </button>
@@ -2109,6 +2120,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
             <p className="t-sub text-faint">Писать могут только администраторы канала</p>
           </div>
         )}
+        </div>
       </div>
 
       <AnimatePresence>
@@ -2265,9 +2277,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
         ) : isSaved ? (
           <>
             <div className="flex flex-col items-center pb-3 text-center">
-              <span className="grid size-24 place-items-center rounded-full bg-foreground/8 text-foreground/75">
-                <Bookmark size={34} fill="currentColor" strokeWidth={1.4} />
-              </span>
+              <SavedAvatar size={96} />
               <p className="t-h mt-4">Избранное</p>
               <p className="t-sub mt-1 text-faint">Личные заметки</p>
             </div>
@@ -2294,7 +2304,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
 
             <div className="relative flex flex-col items-center pb-3 text-center">
               <div className="rounded-full bg-card p-1">
-                <Avatar name={chat.name} src={peerProfile?.avatar ?? chat.avatar} size={96} />
+                <Avatar name={chat.name} src={peerProfile ? visibleProfileAvatar(peerProfile, true) : chat.avatar} size={96} />
               </div>
               <p className="t-h mt-3 flex items-center justify-center gap-1.5">
                 <span className="truncate">{peerProfile?.name || chat.name}</span>
@@ -2323,9 +2333,9 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
                 <span className="grid size-8 shrink-0 place-items-center rounded-[10px] bg-foreground/6 text-foreground/60"><Mail size={15} /></span>
                 <span className="min-w-0 flex-1">
                   <span className="t-cap block text-faint">Gmail</span>
-                  <span className="t-body mt-0.5 block truncate">{chat.email ?? "Скрыт настройками приватности"}</span>
+                  <span className="t-body mt-0.5 block truncate">{peerProfile?.phoneVisibility === "nobody" ? "Скрыт настройками приватности" : chat.email ?? "Скрыт настройками приватности"}</span>
                 </span>
-                {chat.email ? (
+                {chat.email && peerProfile?.phoneVisibility !== "nobody" ? (
                   <IconButton label="Скопировать почту" className="size-8" onClick={async () => {
                     try {
                       await navigator.clipboard.writeText(chat.email ?? "");
@@ -2608,7 +2618,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
   );
 }
 
-export function ChatScreen({ chatId, onBack, onCall, onOpenChat }: { chatId: string; onBack: () => void; onCall: () => void; onOpenChat: (chatId: string) => void; }) {
+export function ChatScreen({ chatId, onBack, onCall, onOpenChat, desktop = false }: { chatId: string; onBack: () => void; onCall: () => void; onOpenChat: (chatId: string) => void; desktop?: boolean; }) {
   const { state } = useAuthedStore();
   const chat = state.chats.find((item) => item.id === chatId);
 
@@ -2622,5 +2632,5 @@ export function ChatScreen({ chatId, onBack, onCall, onOpenChat }: { chatId: str
     );
   }
 
-  return <ChatRoom key={chat.id} chat={chat} onBack={onBack} onCall={onCall} onOpenChat={onOpenChat} />;
+  return <ChatRoom key={chat.id} chat={chat} onBack={onBack} onCall={onCall} onOpenChat={onOpenChat} desktop={desktop} />;
 }
