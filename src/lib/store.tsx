@@ -24,7 +24,7 @@ import type {
   User,
 } from "../types";
 import { createInitialState, DEFAULT_SETTINGS, STATE_VERSION } from "./data";
-import { loadCloudState, saveCloudState } from "./cloud";
+import { loadCloudState, saveCloudState, subscribeCloudState, type CloudSnapshot } from "./cloud";
 import { supabase } from "./supabase";
 import {
   blockRemoteUser,
@@ -56,7 +56,7 @@ import {
   pollIdOf,
   subscribePollVotes,
 } from "./polls";
-import { deviceStillActive, registerDevice, subscribeDeviceRevoked } from "./devices";
+import { deviceId, deviceStillActive, registerDevice, subscribeDeviceRevoked } from "./devices";
 import { subscribePresence } from "./presence";
 import { deleteStoragePaths, storagePathFromUrl } from "./files";
 import { isZeroIdentity } from "./identity";
@@ -207,6 +207,125 @@ function loadState(): AppState {
 
 function accountKey(email: string) {
   return email.trim().toLowerCase();
+}
+
+/** Устойчивый ключ чата: id на разных устройствах разные. */
+function chatKeyOf(chat: Chat): string {
+  if (chat.saved) return "saved";
+  if (chat.id === "c_zero") return "c_zero";
+  if (chat.group?.key) return `group:${chat.group.key}`;
+  if (chat.email) return `email:${normalizeEmail(chat.email)}`;
+  return `id:${chat.id}`;
+}
+
+function messageKeyOf(message: Message): string {
+  return message.remoteId ? `r:${message.remoteId}` : `i:${message.id}`;
+}
+
+function mergeMessages(local: Message[], remote: Message[]): Message[] {
+  const map = new Map<string, Message>();
+  for (const message of remote) map.set(messageKeyOf(message), message);
+  for (const message of local) {
+    const key = messageKeyOf(message);
+    const other = map.get(key);
+    map.set(
+      key,
+      other
+        ? {
+            ...message,
+            ...other,
+            id: message.id,
+            chatId: message.chatId,
+            fromMe: message.fromMe,
+            fresh: message.fresh,
+            status: message.status ?? other.status,
+            sender: message.sender ?? other.sender,
+            senderAvatar: other.senderAvatar ?? message.senderAvatar,
+          }
+        : message,
+    );
+  }
+  return [...map.values()].sort((a, b) => a.at - b.at);
+}
+
+function mergeRemoteChats(localChats: Chat[], remoteChats: Chat[]): Chat[] {
+  const local = new Map(localChats.map((chat) => [chatKeyOf(chat), chat]));
+  const seen = new Set<string>();
+  const result: Chat[] = [];
+
+  for (const remote of remoteChats) {
+    const key = chatKeyOf(remote);
+    seen.add(key);
+    const mine = local.get(key);
+    if (!mine) {
+      result.push(remote);
+      continue;
+    }
+    result.push({
+      ...mine,
+      name: remote.name || mine.name,
+      username: remote.username ?? mine.username,
+      email: remote.email ?? mine.email,
+      phone: remote.phone ?? mine.phone,
+      avatar: remote.avatar ?? mine.avatar,
+      verified: remote.verified ?? mine.verified,
+      group: remote.group ?? mine.group,
+      pinnedChat: remote.pinnedChat ?? mine.pinnedChat,
+      muted: remote.muted ?? mine.muted,
+      saved: Boolean(mine.saved || remote.saved),
+      remote: Boolean(mine.remote || remote.remote),
+      historyLoaded: Boolean(mine.historyLoaded || remote.historyLoaded),
+      messages: mergeMessages(mine.messages, remote.messages),
+    });
+  }
+
+  // Локальные чаты, которых ещё нет в облаке, не теряем.
+  for (const chat of localChats) {
+    if (!seen.has(chatKeyOf(chat))) result.push(chat);
+  }
+  return withSavedChat(result);
+}
+
+function mergeCalls(local: CallRecord[], remote: CallRecord[]): CallRecord[] {
+  const map = new Map<string, CallRecord>();
+  for (const call of remote) map.set(call.id, call);
+  for (const call of local) if (!map.has(call.id)) map.set(call.id, call);
+  return [...map.values()].sort((a, b) => b.at - a.at);
+}
+
+/** Применяет снимок другого устройства и возвращает тот же объект, если ничего не изменилось. */
+function applyCloudSnapshot(prev: AppState, snapshot: CloudSnapshot): AppState {
+  if (!prev.user) return prev;
+  const email = accountKey(prev.user.email || prev.user.phone || "");
+
+  const user: User = snapshot.user
+    ? { ...prev.user, ...snapshot.user, id: prev.user.id, createdAt: prev.user.createdAt }
+    : prev.user;
+  const settings: Settings = snapshot.settings
+    ? { ...DEFAULT_SETTINGS, ...snapshot.settings }
+    : prev.settings;
+  const calls = Array.isArray(snapshot.calls)
+    ? mergeCalls(prev.calls, snapshot.calls)
+    : prev.calls;
+  const chats = Array.isArray(snapshot.chats)
+    ? mergeRemoteChats(prev.chats, cleanChats(snapshot.chats))
+    : prev.chats;
+
+  const same =
+    JSON.stringify(user) === JSON.stringify(prev.user) &&
+    JSON.stringify(settings) === JSON.stringify(prev.settings) &&
+    JSON.stringify(calls) === JSON.stringify(prev.calls) &&
+    JSON.stringify(chats) === JSON.stringify(prev.chats);
+  if (same) return prev;
+
+  return {
+    ...prev,
+    user,
+    accounts: email ? { ...prev.accounts, [email]: user } : prev.accounts,
+    settings,
+    calls,
+    chats,
+  };
 }
 
 /** Восстанавливает аккаунт из публичного профиля на новом устройстве. */
@@ -378,6 +497,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const stateRef = useRef(state);
   const activeChatRef = useRef<string | null>(null);
   const cloudPulledFor = useRef<string | null>(null);
+  const lastCloudSync = useRef(0);
   const syncedFor = useRef<string | null>(null);
   const toastTimer = useRef<number | null>(null);
   const [toast, setToast] = useState<ToastData | null>(null);
@@ -455,9 +575,47 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     if (!account) return;
     const timer = window.setTimeout(() => {
       void saveCloudState(account, state).catch(() => undefined);
-    }, 1600);
+    }, 700);
     return () => window.clearTimeout(timer);
   }, [state]);
+
+  // Живая синхронизация всей копии аккаунта между устройствами: настройки,
+  // профиль, чаты и звонки применяются сразу, без перезагрузки.
+  useEffect(() => {
+    const current = state.user;
+    if (!current?.email) return;
+    const email = normalizeEmail(current.email);
+
+    const applyRemote = (snapshot: CloudSnapshot) => {
+      // Своё же эхо после сохранения игнорируем.
+      if (snapshot.device && snapshot.device === deviceId()) return;
+      const stamp =
+        snapshot.savedAt ??
+        (snapshot.updated_at ? Date.parse(snapshot.updated_at) : 0);
+      if (stamp && stamp <= lastCloudSync.current) return;
+      lastCloudSync.current = stamp || Date.now();
+
+      commit((prev) => {
+        if (!prev.user || normalizeEmail(prev.user.email) !== email) return prev;
+        return applyCloudSnapshot(prev, snapshot);
+      });
+    };
+
+    const channel = subscribeCloudState(email, applyRemote);
+    // Запасной догон на случай, если Realtime для таблицы ещё не включён.
+    const timer = window.setInterval(() => {
+      void loadCloudState(email)
+        .then((snapshot) => {
+          if (snapshot) applyRemote(snapshot);
+        })
+        .catch(() => undefined);
+    }, 15_000);
+
+    return () => {
+      window.clearInterval(timer);
+      if (channel) void supabase.removeChannel(channel);
+    };
+  }, [state.user?.email, commit]);
 
   // Публичный профиль: по нему другие люди находят вас через @username.
   // Запись идёт с задержкой и строго по очереди: иначе ответы upsert могли

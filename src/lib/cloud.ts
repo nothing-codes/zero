@@ -1,5 +1,6 @@
 import type { AppState } from "../types";
 import { decryptState, encryptState, identityBackup, isEncryptedState, type EncryptedState } from "./e2ee";
+import { deviceId } from "./devices";
 import { supabase } from "./supabase";
 
 /**
@@ -18,6 +19,10 @@ export const CLOUD_TABLE = "zero_states";
 export type CloudState = Pick<AppState, "version" | "user" | "chats" | "calls" | "settings"> & {
   /** Приватный ключ шифрования — нужен для входа с другого устройства. */
   identity?: EncryptedState | null;
+  /** Устройство, сделавшее последнюю запись (чтобы не применять своё же эхо). */
+  device?: string;
+  /** Время записи в миллисекундах — защита от применения устаревшей копии. */
+  savedAt?: number;
 };
 
 export interface CloudSnapshot extends CloudState {
@@ -39,6 +44,8 @@ export async function saveCloudState(email: string, state: AppState): Promise<vo
     chats: state.chats,
     calls: state.calls,
     settings: state.settings,
+    device: deviceId(),
+    savedAt: Date.now(),
     ...(identity ? { identity } : {}),
   };
 
@@ -77,4 +84,45 @@ export async function loadCloudState(email: string): Promise<CloudSnapshot | nul
   const legacy = data.state as CloudState;
   if (!legacy || typeof legacy !== "object") return null;
   return { ...legacy, updated_at: data.updated_at };
+}
+
+/**
+ * Живая синхронизация всей копии аккаунта: как только другое устройство
+ * сохраняет настройки/профиль/чаты, оно присылает зашифрованный снимок сюда.
+ */
+export function subscribeCloudState(
+  email: string,
+  onChange: (snapshot: CloudSnapshot) => void,
+) {
+  const key = accountKey(email);
+  if (!key) return null;
+  return supabase
+    .channel(`zero-state-${key.replace(/[^a-z0-9]/gi, "-")}`)
+    .on(
+      "postgres_changes",
+      {
+        event: "*",
+        schema: "public",
+        table: CLOUD_TABLE,
+        filter: `phone=eq.${key}`,
+      },
+      (event) => {
+        const row = event.new as { state?: unknown; updated_at?: string } | null;
+        if (!row?.state) return;
+        void (async () => {
+          try {
+            let snapshot: CloudState | null = null;
+            if (isEncryptedState(row.state)) {
+              snapshot = await decryptState<CloudState>(row.state, key);
+            } else if (row.state && typeof row.state === "object") {
+              snapshot = row.state as CloudState;
+            }
+            if (snapshot) onChange({ ...snapshot, updated_at: row.updated_at });
+          } catch {
+            /* ключ ещё не готов или чужое устройство — попробуем позже */
+          }
+        })();
+      },
+    )
+    .subscribe();
 }
