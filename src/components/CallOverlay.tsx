@@ -591,7 +591,7 @@ export function CallOverlay({
                   void acceptIncoming();
                 }}
                 aria-label="Принять звонок. Свайп влево — отклонить"
-                className="grid size-[76px] cursor-grab touch-pan-y place-items-center rounded-full bg-danger text-white shadow-[0_18px_50px_-12px_rgba(255,50,50,0.5)] active:cursor-grabbing"
+                className="grid size-[76px] cursor-grab touch-pan-y place-items-center rounded-full bg-white text-[#0b0b0c] shadow-[0_18px_50px_-12px_rgba(0,0,0,0.55)] active:cursor-grabbing"
               >
                 <Phone size={28} strokeWidth={1.9} />
               </motion.button>
@@ -600,7 +600,7 @@ export function CallOverlay({
                 type="button"
                 onClick={hangUp}
                 aria-label="Завершить звонок"
-                className="grid size-[76px] place-items-center rounded-full bg-danger text-white shadow-[0_18px_50px_-12px_rgba(255,50,50,0.5)] transition-transform active:scale-95"
+                className="grid size-[76px] place-items-center rounded-full bg-white text-[#0b0b0c] shadow-[0_18px_50px_-12px_rgba(0,0,0,0.55)] transition-transform active:scale-95"
               >
                 <PhoneOff size={27} strokeWidth={1.9} />
               </button>
