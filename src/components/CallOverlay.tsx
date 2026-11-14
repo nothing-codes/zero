@@ -394,6 +394,11 @@ export function CallOverlay({
     return () => window.clearInterval(timer);
   }, [phase]);
 
+  // После ответа кнопка не должна оставаться сдвинутой — возвращаем её в центр.
+  useEffect(() => {
+    animate(swipeX, 0, { type: "spring", stiffness: 420, damping: 32 });
+  }, [phase, swipeX]);
+
   // Входящий рингтон.
   useEffect(() => {
     if (phase !== "incoming") return;
@@ -476,8 +481,9 @@ export function CallOverlay({
   ];
 
   const ring = phase === "incoming" || phase === "calling";
-  // Входящий, который ещё не соединился: кнопка зелёная.
-  const incomingPending = Boolean(incoming) && (phase === "incoming" || phase === "connecting");
+  // Входящий, который ещё не принят: кнопка зелёная. После ответа — только
+  // красная кнопка завершения строго по центру.
+  const incomingPending = Boolean(incoming) && phase === "incoming";
 
   return (
     <motion.div
@@ -589,6 +595,7 @@ export function CallOverlay({
               dragConstraints={{ left: -128, right: 128 }}
               dragElastic={0.1}
               dragMomentum={false}
+              dragSnapToOrigin
               style={{
                 x: swipeX,
                 ...(incomingPending ? { backgroundColor: swipeTone } : {}),
@@ -596,8 +603,7 @@ export function CallOverlay({
               onDragStart={() => { swipeDragged.current = false; }}
               onDragEnd={(_, info) => {
                 if (Math.abs(info.offset.x) > 8) swipeDragged.current = true;
-                if (info.offset.x > 84 && incoming && phaseRef.current === "incoming") {
-                  swipeX.set(0);
+                if (info.offset.x > 84 && incomingPending) {
                   void acceptIncoming();
                   return;
                 }
@@ -612,13 +618,12 @@ export function CallOverlay({
                   swipeDragged.current = false;
                   return;
                 }
-                if (incoming && phaseRef.current === "incoming") {
+                if (incomingPending) {
                   void acceptIncoming();
                   return;
                 }
                 hangUp();
               }}
-              disabled={phase === "connecting" && Boolean(incoming)}
               aria-label={
                 incoming && phase === "incoming"
                   ? "Принять звонок. Свайп влево — отклонить"

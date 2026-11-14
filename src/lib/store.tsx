@@ -460,10 +460,31 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   }, [state]);
 
   // Публичный профиль: по нему другие люди находят вас через @username.
+  // Запись идёт с задержкой и строго по очереди: иначе ответы upsert могли
+  // приходить в старом порядке и «перезаписывать» закреплённую музыку null.
+  const profileWrite = useRef<Promise<void>>(Promise.resolve());
+  const profileSyncTimer = useRef<number | null>(null);
   useEffect(() => {
     if (!state.user?.email) return;
-    void upsertProfile(state.user, state.settings).catch(() => undefined);
     migrateLegacyContent(state.user.email);
+
+    const user = state.user;
+    const settings = state.settings;
+    if (profileSyncTimer.current) window.clearTimeout(profileSyncTimer.current);
+    profileSyncTimer.current = window.setTimeout(() => {
+      profileSyncTimer.current = null;
+      profileWrite.current = profileWrite.current
+        .catch(() => undefined)
+        .then(() => upsertProfile(user, settings))
+        .catch(() => undefined);
+    }, 320);
+
+    return () => {
+      if (profileSyncTimer.current) {
+        window.clearTimeout(profileSyncTimer.current);
+        profileSyncTimer.current = null;
+      }
+    };
   }, [state.user, state.settings.lastSeen, state.settings.profilePhoto, state.settings.phoneNumber]);
 
   // При входе берём профиль с сервера, чтобы удалённые баннер и музыка
@@ -488,9 +509,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 banner: profile.banner ?? null,
                 bio: profile.bio,
                 status: profile.status || prev.user.status,
-                pinnedMusic: profile.pinnedMusic ?? null,
+                // Пустой ответ сервера не должен снимать закреплённую музыку:
+                // иначе трек «сам» открепляется при каждой синхронизации.
+                pinnedMusic: profile.pinnedMusic ?? prev.user.pinnedMusic ?? null,
               }
-            : { ...prev.user, banner: null, pinnedMusic: null };
+            : {
+                ...prev.user,
+                banner: null,
+                pinnedMusic: prev.user.pinnedMusic ?? null,
+              };
           const changed =
             next.name !== prev.user.name ||
             next.username !== prev.user.username ||
@@ -539,7 +566,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               banner: profile.banner ?? null,
               bio: profile.bio,
               status: profile.status || prev.user.status,
-              pinnedMusic: profile.pinnedMusic ?? null,
+              pinnedMusic: profile.pinnedMusic ?? prev.user.pinnedMusic ?? null,
             };
             const changed =
               next.name !== prev.user.name ||
@@ -2222,6 +2249,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               // превращаться в почту — оставляем сохранённое имя или @username.
               name: preferredName(profile?.name, profile?.username) || local.name,
               username: normalizeUsername(profile?.username ?? "") || local.username,
+              pinnedMusic: server.pinnedMusic ?? local.pinnedMusic ?? null,
               id: local.id,
               createdAt: local.createdAt,
             }
