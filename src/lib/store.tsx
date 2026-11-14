@@ -24,6 +24,8 @@ import { createInitialState, DEFAULT_SETTINGS, STATE_VERSION } from "./data";
 import { loadCloudState, saveCloudState } from "./cloud";
 import { supabase } from "./supabase";
 import {
+  deleteRemoteMessage,
+  editRemoteMessage,
   loadConversation,
   loadRecentIncoming,
   markConversationRead,
@@ -34,6 +36,7 @@ import {
   upsertProfile,
   type RemoteMessageRow,
 } from "./chat";
+import { deleteStoragePaths, storagePathFromUrl } from "./files";
 import { haptic, stripEmoji, uid } from "./utils";
 import {
   playTone,
@@ -176,7 +179,9 @@ function payloadOf(message: Message): MessagePayload {
     file: message.file,
     location: message.location,
     poll: message.poll,
+    replyTo: message.replyTo,
     forwardedFrom: message.forwardedFrom,
+    edited: message.edited,
   };
 }
 
@@ -221,7 +226,7 @@ interface StoreValue {
   updateProfile: (patch: Partial<User>) => void;
   updateSettings: (patch: Partial<Settings>) => void;
   sendMessage: (chatId: string, data: SendPayload) => string | undefined;
-  setMessageMediaSource: (chatId: string, messageId: string, kind: "voice" | "videoNote", src: string) => void;
+  setMessageMediaSource: (chatId: string, messageId: string, kind: "voice" | "videoNote" | "file", src: string) => void;
   receiveMessage: (
     chatId: string,
     data: SendPayload,
@@ -238,7 +243,8 @@ interface StoreValue {
   deleteChat: (chatId: string) => void;
   restoreChat: (chat: Chat) => void;
   react: (chatId: string, messageId: string, emoji: string) => void;
-  deleteMessage: (chatId: string, messageId: string) => void;
+  deleteMessage: (chatId: string, messageId: string) => Promise<boolean>;
+  editMessage: (chatId: string, messageId: string, text: string) => Promise<boolean>;
   pinMessage: (chatId: string, messageId: string) => void;
   votePoll: (chatId: string, messageId: string, optionId: string) => void;
   openOrCreateChat: (contact: {
@@ -569,7 +575,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // Supabase уходят после загрузки файла (см. setMessageMediaSource).
       const pendingMedia =
         (data.kind === "voice" && data.voice?.src?.startsWith("blob:")) ||
-        (data.kind === "videoNote" && data.videoNote?.src?.startsWith("blob:"));
+        (data.kind === "videoNote" && data.videoNote?.src?.startsWith("blob:")) ||
+        (data.kind === "file" && Boolean(data.file?.pending));
       if (!pendingMedia) {
         if (chat.remote) {
           void pushToRemote(chat, message, data).then((ok) => {
@@ -586,7 +593,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   );
 
   const setMessageMediaSource = useCallback(
-    (chatId: string, messageId: string, kind: "voice" | "videoNote", src: string) => {
+    (chatId: string, messageId: string, kind: "voice" | "videoNote" | "file", src: string) => {
       commit((prev) => ({
         ...prev,
         chats: prev.chats.map((chat) => {
@@ -601,6 +608,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               if (kind === "videoNote" && message.videoNote) {
                 return { ...message, videoNote: { ...message.videoNote, src } };
               }
+              if (kind === "file" && message.file) {
+                return { ...message, file: { ...message.file, src, pending: false } };
+              }
               return message;
             }),
           };
@@ -614,7 +624,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const payload: SendPayload =
         kind === "voice"
           ? { kind: "voice", voice: message.voice }
-          : { kind: "videoNote", videoNote: message.videoNote };
+          : kind === "videoNote"
+            ? { kind: "videoNote", videoNote: message.videoNote }
+            : { kind: "file", file: message.file };
       void pushToRemote(chat, message, payload).then((ok) => {
         if (ok) updateMessageStatus(chatId, messageId, "sent");
       });
@@ -762,16 +774,108 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [commit],
   );
 
-  const deleteMessage = useCallback(
-    (chatId: string, messageId: string) => {
+  const editMessage = useCallback(
+    async (chatId: string, messageId: string, text: string) => {
+      const current = stateRef.current;
+      const chat = current.chats.find((item) => item.id === chatId);
+      const message = chat?.messages.find((item) => item.id === messageId);
+      const value = text.trim();
+      if (!chat || !message || !message.fromMe || message.kind !== "text" || !value) {
+        return false;
+      }
+
+      const payload: MessagePayload = { ...payloadOf(message), text: value, edited: true };
+      if (chat.remote) {
+        const meEmail = current.user?.email ?? "";
+        try {
+          await editRemoteMessage({
+            id: message.remoteId,
+            clientId: message.id,
+            senderEmail: meEmail,
+            payload,
+          });
+        } catch {
+          return false;
+        }
+      }
+
       commit((prev) => ({
         ...prev,
-        chats: prev.chats.map((chat) =>
-          chat.id === chatId
-            ? { ...chat, messages: chat.messages.filter((m) => m.id !== messageId) }
-            : chat,
+        chats: prev.chats.map((item) =>
+          item.id === chatId
+            ? {
+                ...item,
+                messages: item.messages.map((m) =>
+                  m.id === messageId ? { ...m, text: value, edited: true } : m,
+                ),
+              }
+            : item,
         ),
       }));
+      return true;
+    },
+    [commit],
+  );
+
+  const deleteMessage = useCallback(
+    async (chatId: string, messageId: string) => {
+      const current = stateRef.current;
+      const chat = current.chats.find((item) => item.id === chatId);
+      const message = chat?.messages.find((item) => item.id === messageId);
+      if (!chat || !message) return false;
+
+      const pending = message.status === "sending" && !message.remoteId;
+      if (chat.remote && !pending) {
+        try {
+          await deleteRemoteMessage({
+            id: message.remoteId,
+            clientId: message.id,
+            meEmail: current.user?.email ?? "",
+          });
+        } catch {
+          return false;
+        }
+      }
+
+      const mediaUrls = [
+        message.photo?.src,
+        message.voice?.src,
+        message.videoNote?.src,
+        message.file?.src,
+      ].filter((value): value is string => Boolean(value));
+
+      const usedElsewhere = new Set<string>();
+      for (const item of current.chats) {
+        for (const other of item.messages) {
+          if (item.id === chatId && other.id === messageId) continue;
+          const urls = [
+            other.photo?.src,
+            other.voice?.src,
+            other.videoNote?.src,
+            other.file?.src,
+          ];
+          for (const url of urls) if (url) usedElsewhere.add(url);
+        }
+      }
+
+      const paths = mediaUrls
+        .filter((url) => !usedElsewhere.has(url))
+        .map((url) => storagePathFromUrl(url))
+        .filter((path): path is string => Boolean(path));
+
+      commit((prev) => ({
+        ...prev,
+        chats: prev.chats.map((item) =>
+          item.id === chatId
+            ? { ...item, messages: item.messages.filter((m) => m.id !== messageId) }
+            : item,
+        ),
+      }));
+
+      if (paths.length > 0) {
+        void deleteStoragePaths(paths).catch(() => undefined);
+      }
+      return true;
     },
     [commit],
   );
@@ -943,14 +1047,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const clientIds = new Set(
         rows.map((row) => row.client_id).filter((value): value is string => Boolean(value)),
       );
+      const times = remoteMessages.map((message) => message.at);
+      const firstAt = times.length > 0 ? Math.min(...times) : 0;
+      const lastAt = times.length > 0 ? Math.max(...times) : 0;
 
       commit((prev) => ({
         ...prev,
         chats: prev.chats.map((item) => {
           if (item.id !== chatId) return item;
-          const localOnly = item.messages.filter(
-            (message) => !remoteIds.has(message.id) && !clientIds.has(message.id),
-          );
+          const localOnly = item.messages.filter((message) => {
+            if (remoteIds.has(message.id) || clientIds.has(message.id)) return false;
+            if (!message.remoteId) return true;
+            // Сообщение пришло из базы, но в загруженном окне его нет —
+            // значит его удалили у всех. Старую историю за пределами 500
+            // последних сообщений не трогаем.
+            if (rows.length === 0) return false;
+            return message.at < firstAt - 1 || message.at > lastAt + 1;
+          });
           const merged = [...localOnly, ...remoteMessages].sort((a, b) => a.at - b.at);
           return { ...item, messages: merged, historyLoaded: true };
         }),
@@ -1001,6 +1114,47 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               return { ...message, status: "read" as const };
             });
             return changed ? { ...chat, messages } : chat;
+          }),
+        }));
+      },
+      (row) => {
+        const peerEmail = normalizeEmail(row.sender_email);
+        if (peerEmail === email) return;
+        commit((prev) => ({
+          ...prev,
+          chats: prev.chats.map((chat) => {
+            if (!chat.email || normalizeEmail(chat.email) !== peerEmail) return chat;
+            let changed = false;
+            const messages = chat.messages.map((message) => {
+              if (message.remoteId !== row.id && message.id !== row.client_id) return message;
+              changed = true;
+              return {
+                ...message,
+                ...row.payload,
+                id: message.id,
+                chatId: message.chatId,
+                fromMe: message.fromMe,
+                at: message.at,
+                fresh: message.fresh,
+                status: message.status,
+                sender: message.sender,
+                remoteId: message.remoteId ?? row.id,
+              };
+            });
+            return changed ? { ...chat, messages } : chat;
+          }),
+        }));
+      },
+      (row) => {
+        const rowId = row.id;
+        if (!rowId) return;
+        commit((prev) => ({
+          ...prev,
+          chats: prev.chats.map((chat) => {
+            const messages = chat.messages.filter(
+              (message) => message.remoteId !== rowId && message.id !== rowId,
+            );
+            return messages.length === chat.messages.length ? chat : { ...chat, messages };
           }),
         }));
       },
@@ -1262,6 +1416,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       restoreChat,
       react,
       deleteMessage,
+      editMessage,
       pinMessage,
       votePoll,
       openOrCreateChat,
@@ -1294,6 +1449,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     restoreChat,
     react,
     deleteMessage,
+    editMessage,
     pinMessage,
     votePoll,
     openOrCreateChat,

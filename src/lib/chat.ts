@@ -195,11 +195,53 @@ export async function markConversationRead(
   if (error) throw error;
 }
 
+/** Сохраняет новую версию своего сообщения в базе. */
+export async function editRemoteMessage(input: {
+  id?: string;
+  clientId: string;
+  senderEmail: string;
+  payload: MessagePayload;
+}): Promise<void> {
+  const email = normalizeEmail(input.senderEmail);
+  if (!email) throw new Error("missing-email");
+
+  let query = supabase
+    .from(MESSAGE_TABLE)
+    .update({ payload: input.payload })
+    .eq("sender_email", email);
+
+  query = input.id ? query.eq("id", input.id) : query.eq("client_id", input.clientId);
+
+  const { error } = await query;
+  if (error) throw error;
+}
+
+/** Удаляет сообщение из базы у всех участников. */
+export async function deleteRemoteMessage(input: {
+  id?: string;
+  clientId: string;
+  meEmail: string;
+}): Promise<void> {
+  let query = supabase.from(MESSAGE_TABLE).delete();
+  if (input.id) {
+    query = query.eq("id", input.id);
+  } else {
+    const email = normalizeEmail(input.meEmail);
+    if (!email) throw new Error("missing-email");
+    query = query.eq("client_id", input.clientId).eq("sender_email", email);
+  }
+
+  const { error } = await query;
+  if (error) throw error;
+}
+
 /** Подписка на входящие сообщения текущего пользователя через Realtime. */
 export function subscribeToIncoming(
   meEmail: string,
   onRow: (row: RemoteMessageRow) => void,
   onUpdate?: (row: RemoteMessageRow) => void,
+  onPeerUpdate?: (row: RemoteMessageRow) => void,
+  onDelete?: (row: Partial<RemoteMessageRow>) => void,
 ) {
   const email = normalizeEmail(meEmail);
   const channelName = `zero-chat-${email.replace(/[^a-z0-9]/gi, "-")}`;
@@ -232,6 +274,37 @@ export function subscribeToIncoming(
       (event) => {
         const row = event.new as RemoteMessageRow | null;
         if (row?.id) onUpdate(row);
+      },
+    );
+  }
+
+  if (onPeerUpdate) {
+    channel = channel.on(
+      "postgres_changes",
+      {
+        event: "UPDATE",
+        schema: "public",
+        table: MESSAGE_TABLE,
+        filter: `recipient_email=eq.${email}`,
+      },
+      (event) => {
+        const row = event.new as RemoteMessageRow | null;
+        if (row?.id) onPeerUpdate(row);
+      },
+    );
+  }
+
+  if (onDelete) {
+    channel = channel.on(
+      "postgres_changes",
+      {
+        event: "DELETE",
+        schema: "public",
+        table: MESSAGE_TABLE,
+      },
+      (event) => {
+        const row = event.old as Partial<RemoteMessageRow> | null;
+        if (row?.id) onDelete(row);
       },
     );
   }

@@ -1,6 +1,6 @@
 import { AnimatePresence, motion } from "motion/react";
 import {
-  ArrowDown, ArrowLeft, BadgeCheck, Ban, BarChart3, Camera, Check, CheckCheck, ChevronDown, Clock3, Copy, Eraser, File as FileIcon, Forward, Image as ImageIcon, Mail, Mic, MoreVertical, Paperclip, Pause, Phone, Pin, Play, Plus, Reply, Search, Send, Trash2, Video, X,
+  ArrowDown, ArrowLeft, BadgeCheck, Ban, BarChart3, Camera, Check, CheckCheck, ChevronDown, Clock3, Copy, Download, Eraser, FileArchive, FileAudio, FileImage, FileSpreadsheet, FileText, FileVideo, File as FileIcon, Forward, Image as ImageIcon, Mail, Mic, MoreVertical, Paperclip, Pause, Pencil, Phone, Pin, Play, Plus, Reply, Search, Send, Trash2, Video, X,
 } from "lucide-react";
 import {
   Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject,
@@ -10,6 +10,9 @@ import { ContactPicker } from "../components/ContactPicker";
 import { MapArt, PhotoArt } from "../components/media";
 import { Button, ContextMenu, IconButton, Sheet, SettingsRow } from "../components/ui";
 import { fileToPhoto } from "../lib/image";
+import {
+  downloadFileBlob, pickZeroDirectory, saveImageToGallery, triggerBlobDownload, uploadFileToCloud, writeBlobToDirectory,
+} from "../lib/files";
 import { pickRecorderMime, uploadMedia } from "../lib/media";
 import { useAuthedStore } from "../lib/store";
 import type { Chat, Message, MessageStatus, PollOption } from "../types";
@@ -66,7 +69,7 @@ function UnreadDivider() {
 function Meta({ message, mine }: { message: Message; mine: boolean }) {
   return (
     <span className={cn("mt-1 flex items-center justify-end gap-1", mine ? "text-primary-foreground/55" : "text-foreground/45")}>
-      {message.edited ? <span className="t-time">изм.</span> : null}
+      {message.edited ? <span className="t-time">изменено</span> : null}
       <span className="t-time">{timeOf(message.at)}</span>
       <Ticks status={message.status} mine={mine} />
     </span>
@@ -304,10 +307,69 @@ function PollBubble({ message, mine, onVote }: { message: Message; mine: boolean
   );
 }
 
-function MessageBubble({
-  message, chat, prev, next, replyMessage, activeMatch, flash, onMenu, onScrollTo, searchDimmed, onVote, onMediaLoad,
+type FileTransfer = { mode: "upload" | "download"; progress: number; controller: AbortController };
+
+function fileSizeLabel(size: number) {
+  if (size < 1024) return `${size} Б`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} КБ`;
+  return `${(size / 1024 / 1024).toFixed(1)} МБ`;
+}
+
+function fileVisual(ext: string) {
+  const value = ext.toLowerCase();
+  if (["pdf", "doc", "docx", "txt", "rtf", "md", "odt"].includes(value)) return { Icon: FileText, tone: "text-danger" };
+  if (["xls", "xlsx", "csv", "ods"].includes(value)) return { Icon: FileSpreadsheet, tone: "text-online" };
+  if (["zip", "rar", "7z", "gz", "tar", "bz2"].includes(value)) return { Icon: FileArchive, tone: "text-foreground/80" };
+  if (["jpg", "jpeg", "png", "webp", "gif", "heic", "avif", "svg"].includes(value)) return { Icon: FileImage, tone: "text-foreground/80" };
+  if (["mp3", "wav", "ogg", "m4a", "aac", "flac"].includes(value)) return { Icon: FileAudio, tone: "text-foreground/80" };
+  if (["mp4", "mov", "avi", "mkv", "webm"].includes(value)) return { Icon: FileVideo, tone: "text-foreground/80" };
+  return { Icon: FileIcon, tone: "text-foreground/75" };
+}
+
+function FileBubble({
+  message, mine, transfer, onDownload, onCancel,
 }: {
-  message: Message; chat: Chat; prev?: Message; next?: Message; replyMessage?: Message; activeMatch: boolean; flash: boolean; onMenu: (m: Message, x: number, y: number) => void; onScrollTo: (id: string) => void; searchDimmed: boolean; onVote: (id: string) => void; onMediaLoad: () => void;
+  message: Message; mine: boolean; transfer?: FileTransfer; onDownload: () => void; onCancel: () => void;
+}) {
+  const file = message.file!;
+  const { Icon, tone } = fileVisual(file.ext);
+  const percent = Math.round((transfer?.progress ?? 0) * 100);
+  const canDownload = Boolean(file.src) && !file.pending;
+
+  return (
+    <div className="flex min-w-[232px] max-w-[290px] items-center gap-3">
+      <span className={cn("grid size-11 shrink-0 place-items-center rounded-[12px]", mine ? "bg-primary-foreground/10" : "bg-foreground/10", tone)}>
+        <Icon size={21} strokeWidth={1.7} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="t-sub block truncate font-medium">{file.name}</span>
+        <span className="t-time mt-0.5 flex items-center gap-1 opacity-55">
+          <span className="t-num">{fileSizeLabel(file.size)}</span>
+          {transfer ? <span>· {transfer.mode === "upload" ? "Загрузка" : "Скачивание"} {percent}%</span> : null}
+        </span>
+        {transfer ? (
+          <span className={cn("mt-1.5 block h-[3px] overflow-hidden rounded-full", mine ? "bg-primary-foreground/15" : "bg-foreground/10")}>
+            <span className="block h-full rounded-full bg-current transition-[width] duration-150 ease-out" style={{ width: `${Math.max(2, percent)}%` }} />
+          </span>
+        ) : null}
+      </span>
+      {transfer ? (
+        <button type="button" aria-label="Отменить" onClick={(event) => { event.stopPropagation(); onCancel(); }} className={cn("grid size-8 shrink-0 place-items-center rounded-full transition-colors", mine ? "hover:bg-primary-foreground/10" : "hover:bg-foreground/10")}>
+          <X size={15} />
+        </button>
+      ) : canDownload ? (
+        <button type="button" aria-label="Скачать файл" onClick={(event) => { event.stopPropagation(); onDownload(); }} className={cn("grid size-8 shrink-0 place-items-center rounded-full transition-colors", mine ? "hover:bg-primary-foreground/10" : "hover:bg-foreground/10")}>
+          <Download size={16} />
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function MessageBubble({
+  message, chat, prev, next, replyMessage, activeMatch, flash, onMenu, onScrollTo, searchDimmed, onVote, onMediaLoad, transfer, onFileDownload, onFileCancel,
+}: {
+  message: Message; chat: Chat; prev?: Message; next?: Message; replyMessage?: Message; activeMatch: boolean; flash: boolean; onMenu: (m: Message, x: number, y: number) => void; onScrollTo: (id: string) => void; searchDimmed: boolean; onVote: (id: string) => void; onMediaLoad: () => void; transfer?: FileTransfer; onFileDownload: (m: Message) => void; onFileCancel: (m: Message) => void;
 }) {
   const mine = message.fromMe;
   const isGroup = Boolean(chat.group);
@@ -361,10 +423,7 @@ function MessageBubble({
     );
     if (message.kind === "file") return (
       <div className={cn("min-w-[232px] max-w-[290px] p-2.5", bubbleRadius, bubbleTone)}>
-        <div className="flex items-center gap-3">
-          <span className={cn("grid size-11 shrink-0 place-items-center rounded-[12px]", mine ? "bg-primary-foreground/10" : "bg-foreground/10")}><span className="t-cap text-[9px] font-semibold">{message.file?.ext ?? "FILE"}</span></span>
-          <span className="min-w-0 flex-1"><span className="t-sub block truncate font-medium">{message.file?.name}</span><span className="t-time mt-0.5 block opacity-55">{message.file ? `${(message.file.size / 1024 / 1024).toFixed(1)} МБ` : ""}</span></span>
-        </div>
+        <FileBubble message={message} mine={mine} transfer={transfer} onDownload={() => onFileDownload(message)} onCancel={() => onFileCancel(message)} />
         <Meta message={message} mine={mine} />
       </div>
     );
@@ -489,7 +548,7 @@ function RecordingOverlay({ kind, elapsed, cancelled, videoRef, hasStream, level
 }
 
 function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; onCall: () => void; }) {
-  const { sendMessage, setMessageMediaSource, deleteMessage, pinMessage, votePoll, forwardMessage, setDraft, markRead, setActiveChat, openOrCreateChat, clearMessages, loadChatHistory } = useAuthedStore();
+  const { sendMessage, setMessageMediaSource, deleteMessage, editMessage, pinMessage, votePoll, forwardMessage, setDraft, markRead, setActiveChat, openOrCreateChat, clearMessages, loadChatHistory } = useAuthedStore();
   const messages = chat.messages;
   const [text, setText] = useState(chat.draft ?? "");
   const [unreadFromId] = useState<string | null>(() => unreadStartId(chat.messages, chat.unread));
@@ -513,6 +572,10 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   const [confirmClear, setConfirmClear] = useState(false);
   const [showJump, setShowJump] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [editTarget, setEditTarget] = useState<Message | null>(null);
+  const [editText, setEditText] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
+  const [transfers, setTransfers] = useState<Record<string, FileTransfer>>({});
 
   const [recording, setRecording] = useState<{ kind: "voice" | "videoNote"; startedAt: number } | null>(null);
   const [recElapsed, setRecElapsed] = useState(0);
@@ -524,6 +587,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   const scrollRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
   const textRef = useRef<HTMLTextAreaElement>(null);
+  const editTextRef = useRef<HTMLTextAreaElement>(null);
   const photoInput = useRef<HTMLInputElement>(null);
   const cameraInput = useRef<HTMLInputElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -550,11 +614,34 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   const levelsRef = useRef<number[]>([]);
   const analyserRef = useRef<AnalyserNode | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
+  const transfersRef = useRef<Record<string, FileTransfer>>({});
+  const zeroDirRef = useRef<Awaited<ReturnType<typeof pickZeroDirectory>>>(null);
+  const zeroDirTried = useRef(false);
 
   const notify = useCallback((value: string) => {
     if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
     setNotice(value);
     noticeTimer.current = window.setTimeout(() => setNotice(null), 2800);
+  }, []);
+
+  const updateTransfer = useCallback((messageId: string, transfer: FileTransfer | null) => {
+    setTransfers((prev) => {
+      const next = { ...prev };
+      if (transfer) next[messageId] = transfer;
+      else delete next[messageId];
+      transfersRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const updateTransferProgress = useCallback((messageId: string, progress: number) => {
+    setTransfers((prev) => {
+      const transfer = prev[messageId];
+      if (!transfer) return prev;
+      const next = { ...prev, [messageId]: { ...transfer, progress } };
+      transfersRef.current = next;
+      return next;
+    });
   }, []);
 
   const byId = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
@@ -643,6 +730,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   useEffect(() => {
     return () => {
       cancelScroll();
+      Object.values(transfersRef.current).forEach((transfer) => transfer.controller.abort());
       if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
       if (holdRef.current?.timer) window.clearTimeout(holdRef.current.timer);
       holdRef.current?.cleanup?.();
@@ -687,6 +775,107 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     setSheetMessage(m);
   }, []);
 
+  const cancelFileTransfer = (message: Message) => {
+    const transfer = transfersRef.current[message.id];
+    if (!transfer) return;
+    transfer.controller.abort();
+  };
+
+  const downloadMessageFile = async (message: Message) => {
+    const file = message.file;
+    if (!file?.src) {
+      notify("Файл ещё не загружен");
+      return;
+    }
+    if (transfersRef.current[message.id]) return;
+
+    if (!zeroDirTried.current) {
+      zeroDirTried.current = true;
+      try {
+        zeroDirRef.current = await pickZeroDirectory();
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        zeroDirRef.current = null;
+      }
+    }
+
+    const controller = new AbortController();
+    updateTransfer(message.id, { mode: "download", progress: 0, controller });
+    try {
+      const blob = await downloadFileBlob(
+        file.src,
+        file.size,
+        (progress) => updateTransferProgress(message.id, progress),
+        controller.signal,
+      );
+      const directory = zeroDirRef.current;
+      if (directory) {
+        try {
+          await writeBlobToDirectory(directory, file.name, blob);
+        } catch {
+          triggerBlobDownload(blob, file.name);
+        }
+      } else {
+        triggerBlobDownload(blob, file.name);
+      }
+      notify("Файл сохранён");
+    } catch (error) {
+      if (controller.signal.aborted) notify("Скачивание отменено");
+      else notify("Не удалось скачать файл");
+    } finally {
+      updateTransfer(message.id, null);
+    }
+  };
+
+  const savePhotoMessage = async (message: Message) => {
+    const src = message.photo?.src;
+    if (!src) return;
+    try {
+      const response = await fetch(src, { cache: "no-store" });
+      if (!response.ok) throw new Error("photo");
+      const blob = await response.blob();
+      const type = blob.type || "image/jpeg";
+      const ext = type.includes("png") ? "png" : type.includes("webp") ? "webp" : type.includes("gif") ? "gif" : "jpg";
+      const outcome = await saveImageToGallery(blob, `zero-${Date.now()}.${ext}`);
+      if (outcome === "canceled") return;
+      notify(outcome === "shared" ? "Выберите «Сохранить в галерею»" : "Фото сохранено");
+    } catch {
+      notify("Не удалось сохранить фото");
+    }
+  };
+
+  useEffect(() => {
+    if (!editTarget) return;
+    const frame = window.requestAnimationFrame(() => {
+      const node = editTextRef.current;
+      if (!node) return;
+      node.focus({ preventScroll: true });
+      const end = node.value.length;
+      node.setSelectionRange(end, end);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editTarget]);
+
+  const startEditMessage = (message: Message) => {
+    setEditTarget(message);
+    setEditText(message.text ?? "");
+  };
+
+  const saveEditedMessage = async () => {
+    if (!editTarget || savingEdit) return;
+    const value = editText.trim();
+    if (!value) return;
+    setSavingEdit(true);
+    const ok = await editMessage(chat.id, editTarget.id, value);
+    setSavingEdit(false);
+    if (ok) {
+      setEditTarget(null);
+      notify("Сообщение изменено");
+    } else {
+      notify("Не удалось изменить сообщение");
+    }
+  };
+
   const handleSendText = () => {
     const value = text.trim(); if (!value) return;
     sendMessage(chat.id, { kind: "text", text: value, replyTo: replyTo?.id });
@@ -714,10 +903,34 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     } catch { notify("Не удалось открыть изображение"); }
   };
 
-  const handleFile = (file: File) => {
+  const handleFile = async (file: File) => {
     const ext = (file.name.split(".").pop() ?? "file").toUpperCase().slice(0, 4);
-    sendMessage(chat.id, { kind: "file", file: { name: file.name, size: file.size, ext }, replyTo: replyTo?.id });
-    setReplyTo(null); setAttachOpen(false); notify("Файл отправлен");
+    const messageId = sendMessage(chat.id, {
+      kind: "file",
+      file: { name: file.name, size: file.size, ext, mime: file.type || undefined, pending: true },
+      replyTo: replyTo?.id,
+    });
+    setReplyTo(null);
+    setAttachOpen(false);
+    if (!messageId) return;
+
+    const controller = new AbortController();
+    updateTransfer(messageId, { mode: "upload", progress: 0, controller });
+    try {
+      const uploaded = await uploadFileToCloud(
+        file,
+        (progress) => updateTransferProgress(messageId, progress),
+        controller.signal,
+      );
+      setMessageMediaSource(chat.id, messageId, "file", uploaded.url);
+      notify("Файл отправлен");
+    } catch {
+      if (controller.signal.aborted) notify("Загрузка отменена");
+      else notify("Не удалось отправить файл");
+      await deleteMessage(chat.id, messageId);
+    } finally {
+      updateTransfer(messageId, null);
+    }
   };
 
   const sendPoll = () => { const q = pollQuestion.trim(); const o = pollOptions.map((v) => v.trim()).filter(Boolean); if (!q || o.length < 2) return; sendMessage(chat.id, { kind: "poll", poll: { question: q, options: o.map<PollOption>((t) => ({ id: uid("o"), text: t, votes: 0 })) }, replyTo: replyTo?.id }); setPollOpen(false); setPollQuestion(""); setPollOptions(["", ""]); setReplyTo(null); notify("Опрос создан"); };
@@ -1138,7 +1351,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
                   return (
                     <Fragment key={message.id}>
                       {unreadFromId === message.id ? <UnreadDivider /> : null}
-                      <MessageBubble message={message} chat={chat} prev={messages[allIndex - 1]} next={messages[allIndex + 1]} replyMessage={reply} activeMatch={activeMatchId === message.id} flash={flashId === message.id} onMenu={openMenu} onScrollTo={scrollToMessage} searchDimmed={Boolean(query) && !searchText(message).includes(query)} onVote={(oid) => votePoll(chat.id, message.id, oid)} onMediaLoad={keepBottomOnMedia} />
+                      <MessageBubble message={message} chat={chat} prev={messages[allIndex - 1]} next={messages[allIndex + 1]} replyMessage={reply} activeMatch={activeMatchId === message.id} flash={flashId === message.id} onMenu={openMenu} onScrollTo={scrollToMessage} searchDimmed={Boolean(query) && !searchText(message).includes(query)} onVote={(oid) => votePoll(chat.id, message.id, oid)} onMediaLoad={keepBottomOnMedia} transfer={transfers[message.id]} onFileDownload={(item) => { void downloadMessageFile(item); }} onFileCancel={cancelFileTransfer} />
                     </Fragment>
                   );
                 })}
@@ -1245,12 +1458,33 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
         onClose={() => setSheetMessage(null)}
         items={sheetMessage ? [
           { icon: <Reply size={15} />, label: "Ответить", onClick: () => { const message = sheetMessage; setReplyTo(message); window.setTimeout(() => textRef.current?.focus(), 80); } },
+          ...(sheetMessage.fromMe && sheetMessage.kind === "text" && sheetMessage.text ? [{ icon: <Pencil size={15} />, label: "Изменить", onClick: () => startEditMessage(sheetMessage) }] : []),
+          ...(sheetMessage.kind === "file" && sheetMessage.file?.src ? [{ icon: <Download size={15} />, label: "Сохранить файл", onClick: () => { void downloadMessageFile(sheetMessage); } }] : []),
+          ...(sheetMessage.kind === "photo" && sheetMessage.photo?.src ? [{ icon: <Download size={15} />, label: "Сохранить фото в галерею", onClick: () => { void savePhotoMessage(sheetMessage); } }] : []),
           { icon: <Pin size={15} />, label: sheetMessage.pinned ? "Открепить" : "Закрепить", onClick: () => pinMessage(chat.id, sheetMessage.id) },
           { icon: <Copy size={15} />, label: "Копировать", onClick: () => { void copyMessage(sheetMessage); } },
           { icon: <Forward size={15} />, label: "Переслать", onClick: () => setForwardMessageTarget(sheetMessage) },
-          { icon: <Trash2 size={15} />, label: "Удалить", danger: true, onClick: () => deleteMessage(chat.id, sheetMessage.id) },
+          { icon: <Trash2 size={15} />, label: "Удалить", danger: true, onClick: () => { const message = sheetMessage; void deleteMessage(chat.id, message.id).then((ok) => { if (!ok) notify("Не удалось удалить сообщение"); }); } },
         ] : []}
       />
+
+      <Sheet open={Boolean(editTarget)} onClose={() => { if (!savingEdit) setEditTarget(null); }} title="Изменить сообщение">
+        <div className="pb-2">
+          <textarea
+            ref={editTextRef}
+            value={editText}
+            rows={3}
+            onChange={(event) => setEditText(event.target.value)}
+            className="w-full resize-none rounded-[14px] border border-foreground/10 bg-foreground/[0.04] px-3.5 py-3 text-[15px] leading-[1.4] outline-none transition-colors focus:border-foreground/22"
+          />
+          <div className="mt-3 flex gap-2">
+            <Button variant="secondary" onClick={() => setEditTarget(null)} className="flex-1">Отмена</Button>
+            <Button onClick={() => { void saveEditedMessage(); }} disabled={savingEdit || !editText.trim() || editText.trim() === (editTarget?.text ?? "")} className="flex-1">
+              {savingEdit ? "Сохранение…" : "Сохранить"}
+            </Button>
+          </div>
+        </div>
+      </Sheet>
 
       <Sheet open={profileOpen} onClose={() => setProfileOpen(false)} title="Профиль">
         <div className="flex flex-col items-center pb-3 text-center">

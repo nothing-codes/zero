@@ -83,6 +83,9 @@ export interface MessageFile {
   name: string;
   size: number;
   ext: string;
+  mime?: string;
+  src?: string;
+  pending?: boolean;
 }
 
 export interface MessageLocation {
@@ -130,6 +133,7 @@ export interface MessagePayload {
   poll?: Poll;
   replyTo?: string;
   forwardedFrom?: string;
+  edited?: boolean;
 }
 
 export interface ChatGroup {

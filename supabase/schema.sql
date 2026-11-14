@@ -105,6 +105,10 @@ drop policy if exists "zero_messages update" on public.zero_messages;
 create policy "zero_messages update"
   on public.zero_messages for update using (true) with check (true);
 
+drop policy if exists "zero_messages delete" on public.zero_messages;
+create policy "zero_messages delete"
+  on public.zero_messages for delete using (true);
+
 -- Realtime для мгновенной доставки новых сообщений.
 do $$
 begin
@@ -138,3 +142,8 @@ create policy "zero_media update"
   on storage.objects for update
   using (bucket_id = 'zero-media')
   with check (bucket_id = 'zero-media');
+
+drop policy if exists "zero_media delete" on storage.objects;
+create policy "zero_media delete"
+  on storage.objects for delete
+  using (bucket_id = 'zero-media');
