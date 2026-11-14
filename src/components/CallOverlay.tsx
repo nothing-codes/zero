@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { AnimatePresence, animate, motion, useMotionValue, useTransform } from "motion/react";
+import { AnimatePresence, animate, motion, useMotionValue } from "motion/react";
 import {
   Bluetooth,
   Check,
@@ -89,10 +89,6 @@ export function CallOverlay({
   const [sinkSupported] = useState(() => typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype);
   const [error, setError] = useState<string | null>(null);
   const swipeX = useMotionValue(0);
-  const rejectHint = useTransform(swipeX, [-120, -28, 0], [1, 0, 0]);
-  const acceptHint = useTransform(swipeX, [0, 28, 120], [0, 0, 1]);
-  // Единственная кнопка звонка: влево — положить трубку, вправо — принять.
-  const swipeTone = useTransform(swipeX, [-110, 0], ["#ff3b30", "#30d158"]);
   const swipeDragged = useRef(false);
 
   const finishCall = (direction: Direction) => {
@@ -481,9 +477,8 @@ export function CallOverlay({
   ];
 
   const ring = phase === "incoming" || phase === "calling";
-  // Входящий, который ещё не принят: кнопка зелёная. После ответа — только
-  // красная кнопка завершения строго по центру.
-  const incomingPending = Boolean(incoming) && phase === "incoming";
+  // Входящий, который ещё не принят: по этой кнопке можно свайпнуть вправо.
+  const incomingRinging = Boolean(incoming) && phase === "incoming";
 
   return (
     <motion.div
@@ -540,10 +535,6 @@ export function CallOverlay({
               ) : null}
               <span className={phase === "active" ? "t-num" : undefined}>{label}</span>
             </p>
-
-            {incoming && phase === "incoming" ? (
-              <p className="t-time mt-5 text-center text-white/30">Свайп влево — положить трубку, вправо — принять</p>
-            ) : null}
           </div>
         </div>
 
@@ -570,76 +561,50 @@ export function CallOverlay({
           ) : null}
 
           <div className="relative flex h-[96px] w-full items-center justify-center">
-            {incoming && phase === "incoming" ? (
-              <>
-                <motion.div
-                  style={{ opacity: rejectHint }}
-                  className="pointer-events-none absolute left-3 flex flex-col items-center gap-2 text-danger"
-                >
-                  <span className="grid size-11 place-items-center rounded-full border border-danger/25 bg-danger/10"><PhoneOff size={19} /></span>
-                  <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-danger/70">Отклонить</span>
-                </motion.div>
-                <motion.div
-                  style={{ opacity: acceptHint }}
-                  className="pointer-events-none absolute right-3 flex flex-col items-center gap-2 text-online"
-                >
-                  <span className="grid size-11 place-items-center rounded-full border border-online/25 bg-online/10"><Phone size={19} /></span>
-                  <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-online/80">Принять</span>
-                </motion.div>
-              </>
-            ) : null}
-
-            <motion.button
-              type="button"
-              drag="x"
-              dragConstraints={{ left: -128, right: 128 }}
-              dragElastic={0.1}
-              dragMomentum={false}
-              dragSnapToOrigin
-              style={{
-                x: swipeX,
-                ...(incomingPending ? { backgroundColor: swipeTone } : {}),
-              }}
-              onDragStart={() => { swipeDragged.current = false; }}
-              onDragEnd={(_, info) => {
-                if (Math.abs(info.offset.x) > 8) swipeDragged.current = true;
-                if (info.offset.x > 84 && incomingPending) {
+            {incomingRinging ? (
+              <motion.button
+                type="button"
+                drag="x"
+                dragConstraints={{ left: -128, right: 128 }}
+                dragElastic={0.1}
+                dragMomentum={false}
+                dragSnapToOrigin
+                style={{ x: swipeX }}
+                onDragStart={() => { swipeDragged.current = false; }}
+                onDragEnd={(_, info) => {
+                  if (Math.abs(info.offset.x) > 8) swipeDragged.current = true;
+                  if (info.offset.x > 84) {
+                    void acceptIncoming();
+                    return;
+                  }
+                  if (info.offset.x < -84) {
+                    hangUp();
+                    return;
+                  }
+                  animate(swipeX, 0, { type: "spring", stiffness: 420, damping: 32 });
+                }}
+                onClick={() => {
+                  if (swipeDragged.current) {
+                    swipeDragged.current = false;
+                    return;
+                  }
                   void acceptIncoming();
-                  return;
-                }
-                if (info.offset.x < -84) {
-                  hangUp();
-                  return;
-                }
-                animate(swipeX, 0, { type: "spring", stiffness: 420, damping: 32 });
-              }}
-              onClick={() => {
-                if (swipeDragged.current) {
-                  swipeDragged.current = false;
-                  return;
-                }
-                if (incomingPending) {
-                  void acceptIncoming();
-                  return;
-                }
-                hangUp();
-              }}
-              aria-label={
-                incoming && phase === "incoming"
-                  ? "Принять звонок. Свайп влево — отклонить"
-                  : "Завершить звонок. Свайп влево — положить трубку"
-              }
-              className={cn(
-                "grid size-[76px] cursor-grab touch-pan-y place-items-center rounded-full text-white shadow-[0_18px_50px_-12px_rgba(0,0,0,0.6)] active:cursor-grabbing disabled:opacity-60",
-                incomingPending ? "bg-online" : "bg-danger",
-              )}
-            >
-              {incomingPending ? (
+                }}
+                aria-label="Принять звонок. Свайп влево — отклонить"
+                className="grid size-[76px] cursor-grab touch-pan-y place-items-center rounded-full bg-danger text-white shadow-[0_18px_50px_-12px_rgba(255,50,50,0.5)] active:cursor-grabbing"
+              >
                 <Phone size={28} strokeWidth={1.9} />
-              ) : (
+              </motion.button>
+            ) : (
+              <button
+                type="button"
+                onClick={hangUp}
+                aria-label="Завершить звонок"
+                className="grid size-[76px] place-items-center rounded-full bg-danger text-white shadow-[0_18px_50px_-12px_rgba(255,50,50,0.5)] transition-transform active:scale-95"
+              >
                 <PhoneOff size={27} strokeWidth={1.9} />
-              )}
-            </motion.button>
+              </button>
+            )}
           </div>
         </div>
       </div>
