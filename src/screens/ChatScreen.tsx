@@ -1930,7 +1930,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat, desktop = false }: { chat:
         onTouchStart={cancelScroll}
         className="no-scrollbar relative min-h-0 flex-1 overflow-y-auto overscroll-contain px-4"
       >
-        <div className={cn("mx-auto flex min-h-full w-full flex-col justify-end pb-2 pt-4", desktop ? "max-w-[760px]" : "max-w-[520px]")}>
+        <div className={cn("mx-auto flex min-h-full w-full flex-col justify-end pb-2 pt-4", desktop ? "max-w-none" : "max-w-[520px]")}>
           {messages.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center py-16 text-center">
               {isSaved ? <SavedAvatar size={76} /> : <Avatar name={chat.name} src={chat.avatar} size={76} liquid />}
