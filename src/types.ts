@@ -234,6 +234,8 @@ export interface AppState {
   onboarded: boolean;
   user: User | null;
   accounts: Record<string, User>;
+  /** Чаты каждого аккаунта по отдельности — при смене аккаунта они не смешиваются. */
+  chatAccounts?: Record<string, Chat[]>;
   chats: Chat[];
   calls: CallRecord[];
   settings: Settings;

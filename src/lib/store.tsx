@@ -87,6 +87,19 @@ function withSavedChat(chats: Chat[]): Chat[] {
   return [savedChat(), ...chats];
 }
 
+/** Похоже ли значение на почту (старые копии могли сохранять email в имени). */
+function looksLikeEmail(value?: string | null): boolean {
+  return Boolean(value && /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value.trim()));
+}
+
+/** Если имя потерялось и подставилась почта — показываем @username. */
+function preferredName(name?: string | null, username?: string | null): string {
+  const cleanName = stripEmoji(name ?? "");
+  const handle = (username ?? "").trim().replace(/^@/, "");
+  if (handle && (!cleanName || looksLikeEmail(cleanName))) return handle;
+  return cleanName || handle;
+}
+
 function cleanUser(user: User | null): User | null {
   if (!user) return user;
   // Убираем дефолтную картинку из ранней версии — теперь у профиля чёрная аватарка.
@@ -94,7 +107,7 @@ function cleanUser(user: User | null): User | null {
   return {
     ...next,
     email: (next.email ?? "").trim().toLowerCase(),
-    name: stripEmoji(next.name),
+    name: preferredName(next.name, next.username),
     bio: stripEmoji(next.bio),
     status: stripEmoji(next.status),
   };
@@ -106,7 +119,7 @@ function cleanChats(chats: Chat[]): Chat[] {
     // Чат Zero — настоящий аккаунт: сообщения и файлы уходят на сервер.
     remote: chat.id === "c_zero" ? true : chat.remote,
     typing: false,
-    name: stripEmoji(chat.name),
+    name: preferredName(chat.name, chat.username),
     messages: chat.messages.map((message) => {
       const next = {
         ...message,
@@ -165,11 +178,17 @@ function mergeState(raw: unknown): AppState {
     if (next) accounts[key] = next;
   }
 
+  const chatAccounts: Record<string, Chat[]> = {};
+  for (const [key, chats] of Object.entries(parsed.chatAccounts ?? {})) {
+    if (Array.isArray(chats)) chatAccounts[accountKey(key)] = withSavedChat(cleanChats(chats));
+  }
+
   return {
     version: STATE_VERSION,
     onboarded: Boolean(parsed.onboarded),
     user: cleanUser(parsed.user ?? null),
     accounts,
+    chatAccounts,
     chats,
     calls: parsed.calls,
     settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
@@ -193,12 +212,13 @@ function accountKey(email: string) {
 /** Восстанавливает аккаунт из публичного профиля на новом устройстве. */
 function userFromProfile(profile: ZeroProfile & { createdAt?: number }): User {
   const email = accountKey(profile.email);
-  const fallback = email.split("@")[0] || "user";
+  const handle = normalizeUsername(profile.username);
+  const fallback = handle || email.split("@")[0] || "user";
   return {
     id: uid("u"),
-    name: stripEmoji(profile.name) || fallback,
+    name: preferredName(profile.name, handle) || fallback,
     username:
-      normalizeUsername(profile.username) ||
+      handle ||
       fallback.replace(/[^a-z0-9_]/g, "_").slice(0, 24) ||
       "user",
     email,
@@ -1510,13 +1530,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const nextUsername = username && !existing.username ? username : undefined;
         const nextAvatar = contact.avatar && !existing.avatar ? contact.avatar : undefined;
         const nextRemote = email && !existing.remote ? true : undefined;
-        if (nextEmail || nextUsername || nextAvatar || nextRemote) {
+        // Старые копии могли сохранить почту вместо имени — заменяем её на
+        // настоящее имя или @username, когда оно стало известно.
+        const incomingName = stripEmoji(contact.name ?? "");
+        const nextName =
+          incomingName &&
+          !looksLikeEmail(incomingName) &&
+          (!existing.name || looksLikeEmail(existing.name))
+            ? incomingName
+            : undefined;
+        if (nextEmail || nextUsername || nextAvatar || nextRemote || nextName) {
           commit((prev) => ({
             ...prev,
             chats: prev.chats.map((c) =>
               c.id === existing.id
                 ? {
                     ...c,
+                    name: nextName ?? c.name,
                     email: nextEmail ?? c.email,
                     username: nextUsername ?? c.username,
                     avatar: nextAvatar ?? c.avatar,
@@ -1867,7 +1897,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               (chat) => Boolean(chat.email) && normalizeEmail(chat.email ?? "") === peer,
             );
             chatId = openOrCreateChat({
-              name: existing?.name ?? peer.split("@")[0],
+              name: existing?.name || peer.split("@")[0],
               email: peer,
               username: existing?.username,
               avatar: existing?.avatar ?? null,
@@ -1876,7 +1906,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }
         } else {
           chatId = openOrCreateChat({
-            name: row.sender_name || row.sender_username || sender,
+            name: preferredName(row.sender_name, row.sender_username) || sender,
             username: row.sender_username,
             email: sender,
             avatar: row.sender_avatar,
@@ -1985,7 +2015,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const chatId = group
             ? openOrCreateGroup(group)
             : openOrCreateChat({
-                name: decrypted.sender_name || decrypted.sender_username || senderEmail,
+                name: preferredName(decrypted.sender_name, decrypted.sender_username) || senderEmail,
                 username: senderUsername,
                 email: senderEmail,
                 avatar: decrypted.sender_avatar,
@@ -2185,7 +2215,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const server = profile ? userFromProfile({ ...profile, email: key }) : null;
       const account = local
         ? server
-          ? { ...local, ...server, id: local.id, createdAt: local.createdAt }
+          ? {
+              ...local,
+              ...server,
+              // Пустое имя на сервере не должно затирать локальное и не должно
+              // превращаться в почту — оставляем сохранённое имя или @username.
+              name: preferredName(profile?.name, profile?.username) || local.name,
+              username: normalizeUsername(profile?.username ?? "") || local.username,
+              id: local.id,
+              createdAt: local.createdAt,
+            }
           : local
         : server;
       if (!account) return null;
@@ -2198,11 +2237,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         ) {
           return prev;
         }
+        // Уходя с другого аккаунта, сохраняем его чаты отдельно и
+        // восстанавливаем чаты того, в который входим.
+        const previousKey = prev.user
+          ? accountKey(prev.user.email || prev.user.phone || "")
+          : "";
+        const chatAccounts = { ...(prev.chatAccounts ?? {}) };
+        if (previousKey) chatAccounts[previousKey] = prev.chats;
+        const restored = chatAccounts[key];
         return {
           ...prev,
           user: account,
           onboarded: true,
           accounts: { ...prev.accounts, [key]: account },
+          chatAccounts,
+          chats: restored
+            ? withSavedChat(cleanChats(restored))
+            : withSavedChat(cleanChats(createInitialState().chats)),
         };
       });
       return account;
@@ -2224,7 +2275,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       // не создаём второй профиль с тем же email — просто входим.
       const existing = stateRef.current.accounts[key];
       if (existing) {
-        commit((prev) => ({ ...prev, user: existing, onboarded: true }));
+        commit((prev) => {
+          const previousKey = prev.user
+            ? accountKey(prev.user.email || prev.user.phone || "")
+            : "";
+          const chatAccounts = { ...(prev.chatAccounts ?? {}) };
+          if (previousKey && previousKey !== key) chatAccounts[previousKey] = prev.chats;
+          const restored = chatAccounts[key];
+          return {
+            ...prev,
+            user: existing,
+            onboarded: true,
+            chatAccounts,
+            chats: restored
+              ? withSavedChat(cleanChats(restored))
+              : withSavedChat(cleanChats(createInitialState().chats)),
+          };
+        });
         return;
       }
       const user: User = {
@@ -2245,6 +2312,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         user,
         onboarded: true,
         accounts: { ...prev.accounts, [key]: user },
+        chatAccounts: {
+          ...(prev.chatAccounts ?? {}),
+          ...(prev.user
+            ? { [accountKey(prev.user.email || prev.user.phone || "")]: prev.chats }
+            : {}),
+        },
+        chats: withSavedChat(cleanChats(createInitialState().chats)),
       }));
     },
     [commit],
@@ -2259,6 +2333,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       accounts: user && key
         ? { ...prev.accounts, [key]: user }
         : prev.accounts,
+      // Чат предыдущего аккаунта остаётся только в его ячейке и больше не
+      // показывается при входе в другой аккаунт на этом устройстве.
+      chatAccounts: user && key
+        ? { ...(prev.chatAccounts ?? {}), [key]: prev.chats }
+        : prev.chatAccounts,
+      chats: withSavedChat(cleanChats(createInitialState().chats)),
     }));
     activeChatRef.current = null;
   }, [commit]);

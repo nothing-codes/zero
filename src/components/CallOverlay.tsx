@@ -91,6 +91,9 @@ export function CallOverlay({
   const swipeX = useMotionValue(0);
   const rejectHint = useTransform(swipeX, [-120, -28, 0], [1, 0, 0]);
   const acceptHint = useTransform(swipeX, [0, 28, 120], [0, 0, 1]);
+  // Единственная кнопка звонка: влево — положить трубку, вправо — принять.
+  const swipeTone = useTransform(swipeX, [-110, 0], ["#ff3b30", "#30d158"]);
+  const swipeDragged = useRef(false);
 
   const finishCall = (direction: Direction) => {
     if (ended.current) return;
@@ -473,6 +476,8 @@ export function CallOverlay({
   ];
 
   const ring = phase === "incoming" || phase === "calling";
+  // Входящий, который ещё не соединился: кнопка зелёная.
+  const incomingPending = Boolean(incoming) && (phase === "incoming" || phase === "connecting");
 
   return (
     <motion.div
@@ -493,41 +498,7 @@ export function CallOverlay({
 
       <div className="relative flex h-full w-full max-w-[520px] flex-col px-6 pt-[max(18px,env(safe-area-inset-top,0px))] pb-[max(24px,env(safe-area-inset-bottom,0px))]">
         <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center">
-          {incoming && phase === "incoming" ? (
-            <>
-              <motion.div style={{ opacity: rejectHint }} className="pointer-events-none absolute left-0 top-1/2 flex -translate-y-1/2 flex-col items-center gap-2 text-danger">
-                <span className="grid size-12 place-items-center rounded-full border border-danger/25 bg-danger/10"><PhoneOff size={20} /></span>
-                <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-danger/70">Отклонить</span>
-              </motion.div>
-              <motion.div style={{ opacity: acceptHint }} className="pointer-events-none absolute right-0 top-1/2 flex -translate-y-1/2 flex-col items-center gap-2 text-online">
-                <span className="grid size-12 place-items-center rounded-full border border-online/25 bg-online/10"><Phone size={20} /></span>
-                <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-online/80">Принять</span>
-              </motion.div>
-            </>
-          ) : null}
-
-          <motion.div
-            drag={incoming && phase === "incoming" ? "x" : false}
-            dragConstraints={{ left: 0, right: 0 }}
-            dragElastic={0.55}
-            dragMomentum={false}
-            style={{ x: swipeX }}
-            onDragEnd={(_, info) => {
-              if (info.offset.x > 92) {
-                void acceptIncoming();
-                return;
-              }
-              if (info.offset.x < -92) {
-                hangUp();
-                return;
-              }
-              animate(swipeX, 0, { type: "spring", stiffness: 420, damping: 32 });
-            }}
-            className={cn(
-              "relative flex h-full w-full flex-col items-center justify-center",
-              incoming && phase === "incoming" && "cursor-grab touch-pan-y active:cursor-grabbing",
-            )}
-          >
+          <div className="relative flex h-full w-full flex-col items-center justify-center">
             <div className="relative">
               {ring ? <span className="pulse-ring absolute inset-0 rounded-full border border-white/15" /> : null}
               {ring ? (
@@ -565,66 +536,107 @@ export function CallOverlay({
             </p>
 
             {incoming && phase === "incoming" ? (
-              <p className="t-time mt-5 text-center text-white/30">Свайп вправо — принять, влево — отклонить</p>
+              <p className="t-time mt-5 text-center text-white/30">Свайп влево — положить трубку, вправо — принять</p>
             ) : null}
-          </motion.div>
+          </div>
         </div>
 
         <audio ref={audioRef} autoPlay playsInline className="hidden" />
 
-        {incoming && (phase === "incoming" || phase === "connecting" || phase === "failed") ? (
-          <div className="mt-auto grid w-full grid-cols-2 gap-5 px-7 pb-4">
-            <motion.button
-              type="button"
-              whileTap={{ scale: 0.93 }}
-              onClick={hangUp}
-              aria-label="Отклонить звонок"
-              className="grid h-[68px] w-full place-items-center rounded-full bg-danger text-white shadow-[0_18px_50px_-12px_rgba(255,60,60,0.55)]"
-            >
-              <PhoneOff size={26} strokeWidth={1.9} />
-            </motion.button>
-            <motion.button
-              type="button"
-              whileTap={{ scale: 0.93 }}
-              onClick={() => { void acceptIncoming(); }}
-              disabled={phase === "connecting"}
-              aria-label="Принять звонок"
-              className="grid h-[68px] w-full place-items-center rounded-full bg-online text-white shadow-[0_18px_50px_-12px_rgba(48,209,88,0.55)] disabled:opacity-60"
-            >
-              <Phone size={26} strokeWidth={1.9} />
-            </motion.button>
-          </div>
-        ) : (
-          <div className="mt-auto grid w-full grid-cols-[1fr_auto_1fr] items-center gap-3 px-4 pb-4">
-            <CallButton
-              label={muted ? "Включить микрофон" : "Выключить микрофон"}
-              active={muted}
-              className="justify-self-start"
-              onClick={toggleMute}
-            >
-              {muted ? <MicOff size={20} /> : <Mic size={20} />}
-            </CallButton>
+        <div className="mt-auto flex w-full flex-col items-center gap-5 pb-4">
+          {!(incoming && phase === "incoming") ? (
+            <div className="flex items-center justify-center gap-4">
+              <CallButton
+                label={muted ? "Включить микрофон" : "Выключить микрофон"}
+                active={muted}
+                onClick={toggleMute}
+              >
+                {muted ? <MicOff size={20} /> : <Mic size={20} />}
+              </CallButton>
+              <CallButton
+                label={`Звук звонка: ${routeLabel}`}
+                active={routeOpen}
+                onClick={() => { setRouteOpen(true); void refreshOutputs(); }}
+              >
+                <OutputIcon label={routeLabel} />
+              </CallButton>
+            </div>
+          ) : null}
+
+          <div className="relative flex h-[96px] w-full items-center justify-center">
+            {incoming && phase === "incoming" ? (
+              <>
+                <motion.div
+                  style={{ opacity: rejectHint }}
+                  className="pointer-events-none absolute left-3 flex flex-col items-center gap-2 text-danger"
+                >
+                  <span className="grid size-11 place-items-center rounded-full border border-danger/25 bg-danger/10"><PhoneOff size={19} /></span>
+                  <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-danger/70">Отклонить</span>
+                </motion.div>
+                <motion.div
+                  style={{ opacity: acceptHint }}
+                  className="pointer-events-none absolute right-3 flex flex-col items-center gap-2 text-online"
+                >
+                  <span className="grid size-11 place-items-center rounded-full border border-online/25 bg-online/10"><Phone size={19} /></span>
+                  <span className="text-[10px] font-medium uppercase tracking-[0.16em] text-online/80">Принять</span>
+                </motion.div>
+              </>
+            ) : null}
 
             <motion.button
               type="button"
-              whileTap={{ scale: 0.93 }}
-              onClick={hangUp}
-              aria-label="Завершить звонок"
-              className="grid size-[66px] place-items-center justify-self-center rounded-full bg-danger text-white shadow-[0_16px_44px_-10px_rgba(255,50,50,0.35)]"
+              drag="x"
+              dragConstraints={{ left: -128, right: 128 }}
+              dragElastic={0.1}
+              dragMomentum={false}
+              style={{
+                x: swipeX,
+                ...(incomingPending ? { backgroundColor: swipeTone } : {}),
+              }}
+              onDragStart={() => { swipeDragged.current = false; }}
+              onDragEnd={(_, info) => {
+                if (Math.abs(info.offset.x) > 8) swipeDragged.current = true;
+                if (info.offset.x > 84 && incoming && phaseRef.current === "incoming") {
+                  swipeX.set(0);
+                  void acceptIncoming();
+                  return;
+                }
+                if (info.offset.x < -84) {
+                  hangUp();
+                  return;
+                }
+                animate(swipeX, 0, { type: "spring", stiffness: 420, damping: 32 });
+              }}
+              onClick={() => {
+                if (swipeDragged.current) {
+                  swipeDragged.current = false;
+                  return;
+                }
+                if (incoming && phaseRef.current === "incoming") {
+                  void acceptIncoming();
+                  return;
+                }
+                hangUp();
+              }}
+              disabled={phase === "connecting" && Boolean(incoming)}
+              aria-label={
+                incoming && phase === "incoming"
+                  ? "Принять звонок. Свайп влево — отклонить"
+                  : "Завершить звонок. Свайп влево — положить трубку"
+              }
+              className={cn(
+                "grid size-[76px] cursor-grab touch-pan-y place-items-center rounded-full text-white shadow-[0_18px_50px_-12px_rgba(0,0,0,0.6)] active:cursor-grabbing disabled:opacity-60",
+                incomingPending ? "bg-online" : "bg-danger",
+              )}
             >
-              <PhoneOff size={25} strokeWidth={1.9} />
+              {incomingPending ? (
+                <Phone size={28} strokeWidth={1.9} />
+              ) : (
+                <PhoneOff size={27} strokeWidth={1.9} />
+              )}
             </motion.button>
-
-            <CallButton
-              label={`Звук звонка: ${routeLabel}`}
-              active={routeOpen}
-              className="justify-self-end"
-              onClick={() => { setRouteOpen(true); void refreshOutputs(); }}
-            >
-              <OutputIcon label={routeLabel} />
-            </CallButton>
           </div>
-        )}
+        </div>
       </div>
 
       <AnimatePresence>

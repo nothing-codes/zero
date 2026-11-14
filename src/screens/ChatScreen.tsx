@@ -561,9 +561,9 @@ function FileBubble({
 }
 
 function MessageBubble({
-  message, chat, prev, next, replyMessage, activeMatch, flash, onMenu, onScrollTo, searchDimmed, onVote, onMediaLoad, transfer, onFileDownload, onFileCancel, onReply, highlight, onMention,
+  message, chat, prev, next, replyMessage, activeMatch, flash, onMenu, onScrollTo, searchDimmed, onVote, onMediaLoad, transfer, onFileDownload, onFileCancel, onReply, onOpenPhoto, highlight, onMention,
 }: {
-  message: Message; chat: Chat; prev?: Message; next?: Message; replyMessage?: Message; activeMatch: boolean; flash: boolean; onMenu: (m: Message, x: number, y: number) => void; onScrollTo: (id: string) => void; searchDimmed: boolean; onVote: (id: string) => void; onMediaLoad: () => void; transfer?: FileTransfer; onFileDownload: (m: Message) => void; onFileCancel: (m: Message) => void; onReply: (m: Message) => void; highlight?: string; onMention?: (username: string) => void;
+  message: Message; chat: Chat; prev?: Message; next?: Message; replyMessage?: Message; activeMatch: boolean; flash: boolean; onMenu: (m: Message, x: number, y: number) => void; onScrollTo: (id: string) => void; searchDimmed: boolean; onVote: (id: string) => void; onMediaLoad: () => void; transfer?: FileTransfer; onFileDownload: (m: Message) => void; onFileCancel: (m: Message) => void; onReply: (m: Message) => void; onOpenPhoto: (src: string, caption?: string) => void; highlight?: string; onMention?: (username: string) => void;
 }) {
   const mine = message.fromMe;
   const photoSrc = useMediaSrc(message.photo?.src, message.photo?.enc);
@@ -694,7 +694,17 @@ function MessageBubble({
       <div className={cn("max-w-[286px] overflow-hidden p-1.5", bubbleRadius, bubbleTone)}>
         <div className="block w-full overflow-hidden rounded-[14px]">
           {photoSrc ? (
-            <img src={photoSrc} alt="" draggable={false} onLoad={onMediaLoad} className="max-h-[340px] w-full object-cover" />
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenPhoto(photoSrc, message.photo?.caption);
+              }}
+              className="block w-full cursor-zoom-in"
+              aria-label="Открыть фото"
+            >
+              <img src={photoSrc} alt="" draggable={false} onLoad={onMediaLoad} className="max-h-[340px] w-full object-cover" />
+            </button>
           ) : (
             <div className="aspect-[4/5] w-full bg-foreground/[0.045]" />
           )}
@@ -877,6 +887,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat, desktop = false }: { chat:
   const [savingEdit, setSavingEdit] = useState(false);
   const [transfers, setTransfers] = useState<Record<string, FileTransfer>>({});
   const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [photoView, setPhotoView] = useState<{ src: string; caption?: string } | null>(null);
   const [, setSeenTick] = useState(0);
 
   const [stickerOpen, setStickerOpen] = useState(false);
@@ -1940,7 +1951,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat, desktop = false }: { chat:
                   return (
                     <Fragment key={message.id}>
                       {unreadFromId === message.id ? <UnreadDivider /> : null}
-                      <MessageBubble message={message} chat={chat} prev={messages[allIndex - 1]} next={messages[allIndex + 1]} replyMessage={reply} activeMatch={activeMatchId === message.id} flash={flashId === message.id} onMenu={openMenu} onScrollTo={scrollToMessage} searchDimmed={Boolean(query) && !searchText(message).includes(query)} onVote={(oid) => votePoll(chat.id, message.id, oid)} onMediaLoad={keepBottomOnMedia} transfer={transfers[message.id]} onFileDownload={(item) => { void downloadMessageFile(item); }} onFileCancel={cancelFileTransfer} onReply={(item) => { setReplyTo(item); window.setTimeout(() => textRef.current?.focus({ preventScroll: true }), 80); }} highlight={query} onMention={(username) => { void findMentionedChat(username); }} />
+                      <MessageBubble message={message} chat={chat} prev={messages[allIndex - 1]} next={messages[allIndex + 1]} replyMessage={reply} activeMatch={activeMatchId === message.id} flash={flashId === message.id} onMenu={openMenu} onScrollTo={scrollToMessage} searchDimmed={Boolean(query) && !searchText(message).includes(query)} onVote={(oid) => votePoll(chat.id, message.id, oid)} onMediaLoad={keepBottomOnMedia} transfer={transfers[message.id]} onFileDownload={(item) => { void downloadMessageFile(item); }} onFileCancel={cancelFileTransfer} onReply={(item) => { setReplyTo(item); window.setTimeout(() => textRef.current?.focus({ preventScroll: true }), 80); }} onOpenPhoto={(src, caption) => setPhotoView({ src, caption })} highlight={query} onMention={(username) => { void findMentionedChat(username); }} />
                     </Fragment>
                   );
                 })}
@@ -2607,6 +2618,52 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat, desktop = false }: { chat:
           }}
         />
       ) : null}
+
+      <AnimatePresence>
+        {photoView ? (
+          <motion.div
+            key="photo-viewer"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="absolute inset-0 z-[80] flex flex-col bg-black/92 backdrop-blur-sm"
+            onClick={() => setPhotoView(null)}
+          >
+            <div className="flex items-center justify-between px-4 pt-[max(16px,env(safe-area-inset-top,0px))]">
+              <span className="t-cap text-white/55">Фото</span>
+              <button
+                type="button"
+                aria-label="Закрыть"
+                onClick={(event) => { event.stopPropagation(); setPhotoView(null); }}
+                className="grid size-9 place-items-center rounded-full bg-white/10 text-white transition-colors hover:bg-white/20"
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <div className="flex min-h-0 flex-1 items-center justify-center p-4">
+              <motion.img
+                src={photoView.src}
+                alt=""
+                draggable={false}
+                initial={{ scale: 0.94 }}
+                animate={{ scale: 1 }}
+                exit={{ scale: 0.96 }}
+                transition={{ type: "spring", stiffness: 320, damping: 30 }}
+                onClick={(event) => event.stopPropagation()}
+                className="max-h-full max-w-full select-none rounded-[10px] object-contain shadow-2xl"
+              />
+            </div>
+            {photoView.caption ? (
+              <p className="px-5 pb-[max(24px,env(safe-area-inset-bottom,0px))] text-center text-[14px] leading-snug text-white/85">
+                {photoView.caption}
+              </p>
+            ) : (
+              <div className="pb-[max(24px,env(safe-area-inset-bottom,0px))]" />
+            )}
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
     </div>
   );
 }

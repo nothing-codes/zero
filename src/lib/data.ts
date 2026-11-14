@@ -99,6 +99,7 @@ export function createInitialState(): AppState {
     onboarded: false,
     user: null,
     accounts: {},
+    chatAccounts: {},
     chats: SEED_CHATS,
     calls: SEED_CALLS,
     settings: { ...DEFAULT_SETTINGS },
