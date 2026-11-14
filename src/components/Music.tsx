@@ -1,5 +1,5 @@
 import { Pause, Play, X } from "lucide-react";
-import { useRef, useState, type MouseEvent } from "react";
+import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { useMediaSrc } from "../lib/useMediaSrc";
 import { cn, duration, fileSize, haptic, trackMeta } from "../lib/utils";
 import type { Message, PinnedMusic } from "../types";
@@ -39,10 +39,38 @@ function TrackPlayer({
 }) {
   const mediaSrc = useMediaSrc(src, enc);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const barsRef = useRef<Array<HTMLSpanElement | null>>([]);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const rafRef = useRef(0);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [total, setTotal] = useState(0);
   const [failed, setFailed] = useState(false);
+
+  /** Подключаем анализатор к самому аудио, чтобы полоски двигались в такт треку. */
+  const setupAnalyser = () => {
+    if (analyserRef.current) return analyserRef.current;
+    const element = audioRef.current;
+    if (!element) return null;
+    const Ctor = window.AudioContext
+      ?? (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!Ctor) return null;
+    try {
+      const ctx = new Ctor();
+      const source = ctx.createMediaElementSource(element);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 64;
+      analyser.smoothingTimeConstant = 0.7;
+      source.connect(analyser);
+      analyser.connect(ctx.destination);
+      audioCtxRef.current = ctx;
+      analyserRef.current = analyser;
+      return analyser;
+    } catch {
+      return null;
+    }
+  };
 
   const toggle = () => {
     haptic(4);
@@ -57,9 +85,58 @@ function TrackPlayer({
       return;
     }
     setFailed(false);
+    const analyser = setupAnalyser();
+    if (analyser && audioCtxRef.current?.state === "suspended") {
+      void audioCtxRef.current.resume();
+    }
     void element.play().catch(() => setFailed(true));
     setPlaying(true);
   };
+
+  useEffect(() => {
+    const bars = barsRef.current;
+    const idle = "scaleY(0.38)";
+    const reset = () => bars.forEach((bar) => { if (bar) bar.style.transform = idle; });
+    if (!playing) {
+      window.cancelAnimationFrame(rafRef.current);
+      reset();
+      return;
+    }
+
+    const analyser = analyserRef.current;
+    const data = analyser ? new Uint8Array(analyser.frequencyBinCount) : null;
+    const started = performance.now();
+    const tick = (time: number) => {
+      if (analyser && data) analyser.getByteFrequencyData(data);
+      bars.forEach((bar, index) => {
+        if (!bar) return;
+        const sample = data ? data[Math.min(data.length - 1, 1 + index * 3)] / 255 : 0;
+        const level = sample > 0.03
+          ? 0.18 + sample * 0.82
+          : 0.3 + 0.32 * (0.5 + 0.5 * Math.sin((time - started) / 190 + index * 1.9));
+        bar.style.transform = `scaleY(${level.toFixed(3)})`;
+      });
+      rafRef.current = window.requestAnimationFrame(tick);
+    };
+    rafRef.current = window.requestAnimationFrame(tick);
+    return () => {
+      window.cancelAnimationFrame(rafRef.current);
+      reset();
+    };
+  }, [playing]);
+
+  useEffect(() => {
+    return () => {
+      window.cancelAnimationFrame(rafRef.current);
+      try {
+        void audioCtxRef.current?.close();
+      } catch {
+        /* контекст уже закрыт */
+      }
+      audioCtxRef.current = null;
+      analyserRef.current = null;
+    };
+  }, [mediaSrc]);
 
   const seek = (event: MouseEvent<HTMLDivElement>) => {
     const element = audioRef.current;
@@ -84,8 +161,9 @@ function TrackPlayer({
           {[0, 1, 2].map((index) => (
             <span
               key={index}
-              className="eq-bar h-full w-[3px] rounded-full bg-white/85"
-              style={{ animationDelay: `${index * 0.14}s` }}
+              ref={(node) => { barsRef.current[index] = node; }}
+              className="h-full w-[3px] rounded-full bg-white/85"
+              style={{ transform: "scaleY(0.38)" }}
             />
           ))}
         </span>

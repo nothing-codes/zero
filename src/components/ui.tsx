@@ -222,6 +222,7 @@ export function Sheet({
   children,
   className,
   full,
+  hero,
 }: {
   open: boolean;
   onClose: () => void;
@@ -229,6 +230,8 @@ export function Sheet({
   children: ReactNode;
   className?: string;
   full?: boolean;
+  /** Фон, который уходит под заголовок и верхнюю часть окна. */
+  hero?: ReactNode;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -280,13 +283,25 @@ export function Sheet({
               className,
             )}
           >
-            <div className="flex cursor-grab justify-center pt-2.5 pb-1 active:cursor-grabbing">
-              <span className="h-1 w-9 rounded-full bg-foreground/20" />
+            {hero ? (
+              <div aria-hidden className="pointer-events-none absolute inset-x-0 top-0 h-[200px] overflow-hidden">
+                {hero}
+                <span
+                  className="absolute inset-0"
+                  style={{
+                    background:
+                      "linear-gradient(to top, var(--card) 0%, color-mix(in oklch, var(--card) 55%, transparent) 28%, transparent 72%)",
+                  }}
+                />
+              </div>
+            ) : null}
+            <div className={cn("flex cursor-grab justify-center pt-2.5 pb-1 active:cursor-grabbing", hero && "relative z-10")}>
+              <span className={cn("h-1 w-9 rounded-full", hero ? "bg-white/45" : "bg-foreground/20")} />
             </div>
             {title ? (
-              <div className="flex items-center justify-between px-5 pb-3 pt-2">
-                <h2 className="t-h">{title}</h2>
-                <IconButton label="Закрыть" onClick={onClose} className="-mr-1 size-8">
+              <div className={cn("flex items-center justify-between px-5 pb-3 pt-2", hero && "relative z-10")}>
+                <h2 className={cn("t-h", hero && "text-white drop-shadow")}>{title}</h2>
+                <IconButton label="Закрыть" onClick={onClose} className={cn("-mr-1 size-8", hero && "text-white/85")}>
                   <X size={17} strokeWidth={1.8} />
                 </IconButton>
               </div>

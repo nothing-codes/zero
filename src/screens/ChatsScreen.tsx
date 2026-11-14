@@ -24,8 +24,8 @@ function TypingDots() {
   );
 }
 
-function ChatRow({ chat, open, selected, onOpen, onClose, onChat, onMenu, onReadAll }: {
-  chat: Chat; open: boolean; selected?: boolean; onOpen: () => void; onClose: () => void; onChat: () => void; onMenu: (x: number, y: number) => void; onReadAll: () => void;
+function ChatRow({ chat, open, selected, desktop = false, onOpen, onClose, onChat, onMenu, onReadAll }: {
+  chat: Chat; open: boolean; selected?: boolean; desktop?: boolean; onOpen: () => void; onClose: () => void; onChat: () => void; onMenu: (x: number, y: number) => void; onReadAll: () => void;
 }) {
   const last = chat.messages[chat.messages.length - 1];
   const fresh = Boolean(last?.fresh) || chat.unread > 0;
@@ -60,23 +60,25 @@ function ChatRow({ chat, open, selected, onOpen, onClose, onChat, onMenu, onRead
 
   return (
     <div className="relative overflow-hidden">
-      <div className="absolute inset-y-0 right-0 flex w-[148px]">
-        <button
-          type="button"
-          onClick={() => { haptic(6); onReadAll(); onClose(); }}
-          className="flex w-full flex-col items-center justify-center gap-1.5 bg-foreground/8 text-foreground transition-colors hover:bg-foreground/12"
-        >
-          <CheckCheck size={18} strokeWidth={1.8} />
-          <span className="text-[11px] font-medium leading-none">Прочитать все</span>
-        </button>
-      </div>
+      {desktop ? null : (
+        <div className="absolute inset-y-0 right-0 flex w-[148px]">
+          <button
+            type="button"
+            onClick={() => { haptic(6); onReadAll(); onClose(); }}
+            className="flex w-full flex-col items-center justify-center gap-1.5 bg-foreground/8 text-foreground transition-colors hover:bg-foreground/12"
+          >
+            <CheckCheck size={18} strokeWidth={1.8} />
+            <span className="text-[11px] font-medium leading-none">Прочитать все</span>
+          </button>
+        </div>
+      )}
 
       <motion.div
-        drag="x"
+        drag={desktop ? false : "x"}
         dragDirectionLock
         dragConstraints={{ left: -SWIPE_WIDTH, right: 0 }}
         dragElastic={0.06}
-        animate={{ x: open ? -SWIPE_WIDTH : 0 }}
+        animate={{ x: !desktop && open ? -SWIPE_WIDTH : 0 }}
         transition={{ type: "spring", stiffness: 480, damping: 40, mass: 0.6 }}
         onDragEnd={(_, info) => { if (info.offset.x < -52 || info.velocity.x < -450) onOpen(); else onClose(); }}
         className={cn(
@@ -113,7 +115,6 @@ function ChatRow({ chat, open, selected, onOpen, onClose, onChat, onMenu, onRead
             ) : (
               <Avatar name={chat.name} src={chat.avatar} size={56} online={chat.online} />
             )}
-            {chat.group ? <span className="absolute -right-0.5 -bottom-0.5 grid size-[18px] place-items-center rounded-full border-2 border-background bg-foreground/20 text-foreground">{chat.group.kind === "channel" ? <Megaphone size={8} strokeWidth={2.5} /> : <Users size={8} strokeWidth={2.5} />}</span> : null}
           </span>
           <span className="min-w-0 flex-1">
             <span className="flex items-baseline justify-between gap-2">
@@ -312,7 +313,7 @@ export function ChatsScreen({ onOpenChat, desktop = false, activeChatId = null }
                   <span className="t-cap text-faint">Закреплённые</span>
                 </div>
                 {pinned.map((chat) => (
-                  <ChatRow key={chat.id} chat={chat} open={openRow === chat.id} selected={desktop && activeChatId === chat.id} onOpen={() => setOpenRow(chat.id)} onClose={() => setOpenRow((c) => (c === chat.id ? null : c))} onChat={() => onOpenChat(chat.id)} onMenu={(x, y) => openMenu(chat, x, y)} onReadAll={markAllRead} />
+                  <ChatRow key={chat.id} chat={chat} open={openRow === chat.id} selected={desktop && activeChatId === chat.id} desktop={desktop} onOpen={() => setOpenRow(chat.id)} onClose={() => setOpenRow((c) => (c === chat.id ? null : c))} onChat={() => onOpenChat(chat.id)} onMenu={(x, y) => openMenu(chat, x, y)} onReadAll={markAllRead} />
                 ))}
               </div>
             ) : null}
@@ -323,7 +324,7 @@ export function ChatsScreen({ onOpenChat, desktop = false, activeChatId = null }
                   <span className="t-cap text-faint">{searching ? `Чаты · ${sorted.length}` : "Все чаты"}</span>
                 </div>
                 {regular.map((chat) => (
-                  <ChatRow key={chat.id} chat={chat} open={openRow === chat.id} selected={desktop && activeChatId === chat.id} onOpen={() => setOpenRow(chat.id)} onClose={() => setOpenRow((c) => (c === chat.id ? null : c))} onChat={() => onOpenChat(chat.id)} onMenu={(x, y) => openMenu(chat, x, y)} onReadAll={markAllRead} />
+                  <ChatRow key={chat.id} chat={chat} open={openRow === chat.id} selected={desktop && activeChatId === chat.id} desktop={desktop} onOpen={() => setOpenRow(chat.id)} onClose={() => setOpenRow((c) => (c === chat.id ? null : c))} onChat={() => onOpenChat(chat.id)} onMenu={(x, y) => openMenu(chat, x, y)} onReadAll={markAllRead} />
                 ))}
               </div>
             ) : null}

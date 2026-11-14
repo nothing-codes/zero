@@ -1960,7 +1960,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat, desktop = false }: { chat:
       </AnimatePresence>
 
       <div className="relative z-20 shrink-0 border-t border-foreground/8 bg-background/95 pb-[max(8px,env(safe-area-inset-bottom,0px))] pl-2 pr-2 backdrop-blur-xl">
-        <div className={cn("relative mx-auto w-full", desktop && "max-w-[760px]")}>
+        <div className="relative mx-auto w-full">
         <AnimatePresence>
           {mention && mentionOptions.length > 0 ? (
             <motion.div
@@ -2185,7 +2185,12 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat, desktop = false }: { chat:
         </div>
       </Sheet>
 
-      <Sheet open={profileOpen} onClose={() => setProfileOpen(false)} title="Профиль">
+      <Sheet
+        open={profileOpen}
+        onClose={() => setProfileOpen(false)}
+        title="Профиль"
+        hero={!isGroup && !isSaved ? <BannerVisual banner={peerProfile?.banner ?? null} /> : undefined}
+      >
         {isGroup ? (
           <>
             <div className="flex flex-col items-center pb-3 text-center">
@@ -2290,19 +2295,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat, desktop = false }: { chat:
           </>
         ) : (
           <>
-            <div className="relative -mx-5 -mt-1 mb-[-44px] h-[136px] overflow-hidden">
-              <BannerVisual banner={peerProfile?.banner ?? null} />
-              <span
-                aria-hidden
-                className="pointer-events-none absolute inset-0"
-                style={{
-                  background:
-                    "linear-gradient(to top, var(--card) 0%, color-mix(in oklch, var(--card) 58%, transparent) 26%, transparent 68%)",
-                }}
-              />
-            </div>
-
-            <div className="relative flex flex-col items-center pb-3 text-center">
+            <div className="relative flex flex-col items-center pb-3 pt-[112px] text-center">
               <div className="rounded-full bg-card p-1">
                 <Avatar name={chat.name} src={peerProfile ? visibleProfileAvatar(peerProfile, true) : chat.avatar} size={96} />
               </div>
