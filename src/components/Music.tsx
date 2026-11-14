@@ -4,14 +4,19 @@ import { useMediaSrc } from "../lib/useMediaSrc";
 import { cn, duration, fileSize, haptic, trackMeta } from "../lib/utils";
 import type { Message, PinnedMusic } from "../types";
 
+/**
+ * Обложка трека в стиле приложения: монохромный градиент, без случайных
+ * цветных пятен. Число из названия только слегка меняет светлоту.
+ */
 function coverStyle(seed: string) {
   let hash = 0;
   for (let index = 0; index < seed.length; index += 1) {
-    hash = (hash * 31 + seed.charCodeAt(index)) % 360;
+    hash = (hash * 31 + seed.charCodeAt(index)) % 97;
   }
-  const hue = hash;
+  const top = 30 + (hash % 10);
+  const mid = 18 + (hash % 7);
   return {
-    backgroundImage: `linear-gradient(135deg, hsl(${hue} 62% 44%), hsl(${(hue + 52) % 360} 58% 24%) 55%, hsl(${(hue + 96) % 360} 45% 13%))`,
+    backgroundImage: `radial-gradient(120% 120% at 22% 12%, hsl(0 0% ${top + 8}% / 0.95), transparent 58%), linear-gradient(150deg, hsl(0 0% ${top}%) 0%, hsl(0 0% ${mid}%) 58%, hsl(0 0% 9%) 100%)`,
   };
 }
 
@@ -183,20 +188,22 @@ export function PinnedMusicPlayer({
   onRemove,
 }: {
   track: PinnedMusic;
-  onRemove: () => void;
+  onRemove?: () => void;
 }) {
   return (
     <div className="rounded-[18px] border border-foreground/8 bg-foreground/[0.03] p-3.5">
       <div className="mb-2.5 flex items-center justify-between">
         <span className="t-cap text-faint">Закреплённая музыка</span>
-        <button
-          type="button"
-          onClick={onRemove}
-          aria-label="Снять закрепление"
-          className="grid size-6 place-items-center rounded-full text-faint transition-colors hover:bg-foreground/8 hover:text-foreground"
-        >
-          <X size={13} />
-        </button>
+        {onRemove ? (
+          <button
+            type="button"
+            onClick={onRemove}
+            aria-label="Снять закрепление"
+            className="grid size-6 place-items-center rounded-full text-faint transition-colors hover:bg-foreground/8 hover:text-foreground"
+          >
+            <X size={13} />
+          </button>
+        ) : null}
       </div>
       <TrackPlayer
         src={track.src}

@@ -3,32 +3,12 @@ import { ArrowLeft, CalendarDays, Camera, Check, ChevronRight, Lock, Mail, Messa
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { Avatar } from "../components/Avatar";
 import { PinnedMusicPlayer } from "../components/Music";
+import { BannerVisual } from "../components/ProfileBanner";
 import { PhotoEditor, type PhotoEditorMode } from "../components/PhotoEditor";
 import { Button, IconButton, Sheet } from "../components/ui";
 import { shareText } from "../lib/image";
 import { useAuthedStore } from "../lib/store";
 import { appLink, cn, haptic } from "../lib/utils";
-
-const BANNERS = [
-  { id: "g1", style: "linear-gradient(135deg, #3a3a3c 0%, #141416 55%, #08080a 100%)" },
-  { id: "g2", style: "linear-gradient(135deg, #0a84ff 0%, #004a8f 55%, #071521 100%)" },
-  { id: "g3", style: "linear-gradient(135deg, #ff9f0a 0%, #ff375f 55%, #3a0714 100%)" },
-  { id: "g4", style: "linear-gradient(135deg, #bf5af2 0%, #5e2a8a 55%, #140a20 100%)" },
-  { id: "g5", style: "linear-gradient(135deg, #30d158 0%, #0d5a35 55%, #06130c 100%)" },
-  { id: "g6", style: "linear-gradient(135deg, #ff6482 0%, #8a1838 55%, #1a050b 100%)" },
-];
-
-function isBannerPhoto(value?: string | null) {
-  return Boolean(value && (value.startsWith("data:") || value.startsWith("http://") || value.startsWith("https://")));
-}
-
-function BannerVisual({ banner, className }: { banner?: string | null; className?: string }) {
-  if (isBannerPhoto(banner)) {
-    return <img src={banner ?? ""} alt="" draggable={false} className={cn("h-full w-full object-cover", className)} />;
-  }
-  const style = BANNERS.find((item) => item.id === banner)?.style ?? BANNERS[0].style;
-  return <div className={cn("h-full w-full", className)} style={{ backgroundImage: style }} />;
-}
 
 export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; onOpenSettings: () => void; }) {
   const { state, user, updateProfile } = useAuthedStore();
@@ -93,10 +73,26 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
 
       <div className="no-scrollbar relative z-10 min-h-0 flex-1 overflow-y-auto px-5 pb-[40px]">
         <div className="relative -mx-5">
-          <div className="relative h-[178px] overflow-hidden rounded-b-[28px]">
+          <button
+            type="button"
+            onClick={() => bannerRef.current?.click()}
+            aria-label="Изменить фон профиля"
+            className="relative block h-[178px] w-full overflow-hidden rounded-b-[28px] text-left"
+          >
             <BannerVisual banner={user.banner} />
-            <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent" />
-          </div>
+            {/* Плавное растворение фона снизу вверх — без тяжёлой чёрной плашки. */}
+            <span
+              aria-hidden
+              className="pointer-events-none absolute inset-0"
+              style={{
+                background:
+                  "linear-gradient(to top, var(--background) 0%, color-mix(in oklch, var(--background) 52%, transparent) 22%, transparent 64%)",
+              }}
+            />
+            <span className="pointer-events-none absolute right-4 top-4 grid size-8 place-items-center rounded-full bg-black/25 text-white/80 backdrop-blur-md">
+              <Camera size={14} />
+            </span>
+          </button>
           <div className="relative -mt-[63px] flex justify-center">
             <motion.div initial={{ scale: 0.92, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ type: "spring", stiffness: 260, damping: 24 }} className="relative rounded-full bg-background p-1">
               <Avatar name={user.name} src={user.avatar} size={118} gradient />
@@ -113,7 +109,7 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
           </h1>
           <p className="t-sub mt-1 text-faint">@{user.username}</p>
           <div className="mt-3 flex items-center gap-1.5 rounded-full border border-foreground/10 bg-foreground/[0.04] px-3 py-1.5">
-            <span className="size-1.5 rounded-full bg-online" />
+            <span className="size-1.5 rounded-full bg-foreground/45" />
             <span className="t-sub text-muted-foreground">{user.status || "в сети"}</span>
           </div>
 
@@ -179,44 +175,9 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
         {/* Убран текст "X сообщений в вашем Zero" */}
       </div>
 
+      <input ref={bannerRef} type="file" accept="image/*" onChange={pickBanner} className="hidden" />
+
       <Sheet open={editOpen} onClose={() => setEditOpen(false)} title="Изменить профиль">
-        <div className="relative mb-5 h-[112px] overflow-hidden rounded-[16px]">
-          <BannerVisual banner={draft.banner} />
-          <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent" />
-        </div>
-
-        <div className="mb-5">
-          <p className="t-body font-medium">Баннер</p>
-          <div className="mt-2 flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
-            {BANNERS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                aria-label="Градиент"
-                onClick={() => setDraft((c) => ({ ...c, banner: item.id }))}
-                className={cn(
-                  "size-9 shrink-0 rounded-full border transition-transform",
-                  draft.banner === item.id ? "scale-110 border-foreground ring-2 ring-foreground/15" : "border-foreground/15",
-                )}
-                style={{ backgroundImage: item.style }}
-              />
-            ))}
-            <button
-              type="button"
-              onClick={() => bannerRef.current?.click()}
-              className={cn(
-                "press grid size-9 shrink-0 place-items-center rounded-full border",
-                isBannerPhoto(draft.banner)
-                  ? "border-foreground bg-foreground/10 text-foreground ring-2 ring-foreground/15"
-                  : "border-foreground/15 bg-foreground/6 text-foreground/65",
-              )}
-            >
-              <Camera size={15} />
-            </button>
-          </div>
-          <input ref={bannerRef} type="file" accept="image/*" onChange={pickBanner} className="hidden" />
-        </div>
-
         <div className="flex items-center gap-4 pb-5">
           <button type="button" onClick={() => fileRef.current?.click()} className="relative rounded-full">
             <Avatar name={draft.name || "Zero"} src={draft.avatar} size={76} gradient />
@@ -224,7 +185,6 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
           </button>
           <div className="flex-1">
             <p className="t-body font-medium">Аватар</p>
-            <p className="t-sub mt-0.5 text-faint">Квадратное фото выглядит лучше всего.</p>
             <div className="mt-2 flex gap-2">
               <button type="button" onClick={() => fileRef.current?.click()} className="t-sub rounded-full bg-foreground/8 px-3 py-1.5 font-medium">Загрузить</button>
               {draft.avatar ? <button type="button" onClick={() => setDraft((c) => ({ ...c, avatar: null }))} className="t-sub rounded-full px-3 py-1.5 text-faint">Удалить</button> : null}
@@ -263,7 +223,6 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
               status: draft.status.trim() || "в сети",
               bio: draft.bio.trim(),
               avatar: draft.avatar,
-              banner: draft.banner,
             });
             haptic(8);
             setEditOpen(false);
@@ -282,6 +241,8 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
                 ? { ...current, banner: dataUrl }
                 : { ...current, avatar: dataUrl },
             );
+            // Фон меняется сразу по нажатию на обложку, без сохранения формы.
+            if (editor.mode === "banner") updateProfile({ banner: dataUrl });
             setEditor(null);
             haptic(6);
           }}

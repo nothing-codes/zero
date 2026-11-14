@@ -1,4 +1,4 @@
-import { Check, Loader2, Search, X } from "lucide-react";
+import { Loader2, Search, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { normalizeEmail, normalizeUsername, searchProfiles, type ZeroProfile } from "../lib/chat";
 import { isZeroIdentity } from "../lib/identity";
@@ -160,29 +160,32 @@ export function PeoplePicker({
           const active = selected.some(
             (item) => normalizeEmail(item.email) === normalizeEmail(member.email),
           );
+          // Выбор без галочек: выбранная строка просто подсвечивается,
+          // как список контактов в системном приложении.
           return (
             <button
               key={member.email}
               type="button"
+              aria-pressed={active}
               onClick={() => toggle(member)}
-              className="flex w-full items-center gap-3 rounded-[12px] px-1.5 py-2 text-left transition-colors hover:bg-foreground/5"
+              className={cn(
+                "flex w-full items-center gap-3 rounded-[12px] px-1.5 py-2 text-left transition-colors",
+                active ? "bg-foreground/[0.07]" : "hover:bg-foreground/5",
+              )}
             >
-              <Avatar name={member.name} src={member.avatar} size={40} />
+              <span
+                className={cn(
+                  "shrink-0 rounded-full transition-shadow duration-200",
+                  active ? "shadow-[0_0_0_2px_var(--background),0_0_0_3.5px_color-mix(in_oklch,var(--foreground)_55%,transparent)]" : "",
+                )}
+              >
+                <Avatar name={member.name} src={member.avatar} size={40} />
+              </span>
               <span className="min-w-0 flex-1">
                 <span className="t-body block truncate font-medium">{member.name}</span>
                 <span className="t-sub block truncate text-faint">
                   {member.username ? `@${member.username}` : member.email}
                 </span>
-              </span>
-              <span
-                className={cn(
-                  "grid size-6 shrink-0 place-items-center rounded-full border transition-colors",
-                  active
-                    ? "border-foreground bg-foreground text-background"
-                    : "border-foreground/20 text-transparent",
-                )}
-              >
-                <Check size={13} strokeWidth={2.6} />
               </span>
             </button>
           );

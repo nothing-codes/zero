@@ -916,7 +916,30 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const deleteChat = useCallback(
     (chatId: string) => {
+      const chat = stateRef.current.chats.find((item) => item.id === chatId);
+      const me = stateRef.current.user;
+
+      // Удаляем сразу — интерфейс не должен ждать сеть.
       commit((prev) => ({ ...prev, chats: prev.chats.filter((c) => c.id !== chatId) }));
+      if (!chat?.group || !me?.email) return;
+
+      // Для группы/канала удаляем и серверные копии сообщений, чтобы при
+      // следующем входе история не «всплыла» обратно. Личные чаты
+      // удаляются только локально, как в Telegram.
+      const remoteIds = chat.messages
+        .map((message) => message.remoteId)
+        .filter((value): value is string => Boolean(value));
+      const ownClientIds = chat.messages
+        .filter((message) => message.fromMe)
+        .map((message) => message.id);
+      void (async () => {
+        try {
+          await deleteRemoteMessagesByIds(remoteIds);
+          await deleteOwnMessagesByClientIds(me.email, ownClientIds);
+        } catch {
+          /* офлайн — локальное удаление уже выполнено */
+        }
+      })();
     },
     [commit],
   );
@@ -1552,13 +1575,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const lists = await Promise.all(
           emails.map((email) => loadConversation(myEmail, email).catch(() => [])),
         );
+        // Каждое сообщение группы лежит отдельной строкой у каждого
+        // получателя, поэтому без дедупликации по client_id одна и та же
+        // реплика появлялась несколько раз и пузыри «смешивались».
         const seen = new Set<string>();
         rows = lists
           .flat()
           .filter((row) => row.payload.group?.key === groupKey)
           .filter((row) => {
-            if (seen.has(row.id)) return false;
-            seen.add(row.id);
+            const key = row.client_id || `${row.sender_email}|${row.created_at}|${row.id}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
             return true;
           })
           .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());

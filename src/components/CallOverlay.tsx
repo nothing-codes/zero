@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { animate, motion, useMotionValue, useTransform } from "motion/react";
+import { AnimatePresence, animate, motion, useMotionValue, useTransform } from "motion/react";
 import {
   Bluetooth,
   Check,
@@ -8,6 +8,7 @@ import {
   MicOff,
   Phone,
   PhoneOff,
+  Smartphone,
   Speaker,
   Volume2,
 } from "lucide-react";
@@ -31,9 +32,17 @@ type Direction = "in" | "out" | "missed";
 type AudioOutput = { deviceId: string; label: string };
 type SinkAudioElement = HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
 
+/**
+ * Chrome понимает специальный идентификатор «communications» — это
+ * разговорное устройство (на телефоне — верхний динамик). Если его нет,
+ * падаем обратно на системный маршрут.
+ */
+const EARPIECE_ID = "communications";
+
 function OutputIcon({ label }: { label: string }) {
   if (/bluetooth|блютус|bt/i.test(label)) return <Bluetooth size={20} />;
   if (/headphone|наушник|airpod|buds|гарнитур|headset/i.test(label)) return <Headphones size={20} />;
+  if (/верхн|earpiece|receiver|телефон/i.test(label)) return <Smartphone size={20} />;
   if (/speaker|динамик|monitor|display|hdmi/i.test(label)) return <Speaker size={20} />;
   return <Volume2 size={20} />;
 }
@@ -60,6 +69,7 @@ export function CallOverlay({
   const pcRef = useRef<RTCPeerConnection | null>(null);
   const localRef = useRef<MediaStream | null>(null);
   const iceQueue = useRef<RTCIceCandidateInit[]>([]);
+  const readyRef = useRef<Promise<void>>(Promise.resolve());
   const secondsRef = useRef(0);
   const finishRef = useRef<(direction: Direction) => void>(() => undefined);
   const startRef = useRef<() => void>(() => undefined);
@@ -145,6 +155,13 @@ export function CallOverlay({
     if (element) await applyOutput(element, deviceId);
   };
 
+  /** Ждём подписку на канал: отправка до SUBSCRIBED теряется. */
+  const waitReady = (timeout = 2500) =>
+    Promise.race([
+      readyRef.current,
+      new Promise<void>((resolve) => window.setTimeout(resolve, timeout)),
+    ]);
+
   const flushIce = async () => {
     const pc = pcRef.current;
     if (!pc) return;
@@ -207,6 +224,7 @@ export function CallOverlay({
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       if (ended.current) return;
+      await waitReady();
       await sendSignal(channelRef.current, {
         client: clientId.current,
         kind: "offer",
@@ -235,6 +253,7 @@ export function CallOverlay({
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       if (ended.current) return;
+      await waitReady();
       await sendSignal(channelRef.current, {
         client: clientId.current,
         kind: "answer",
@@ -261,10 +280,12 @@ export function CallOverlay({
     // доставить hangup и у собеседника звонок продолжит звонить.
     const channel = channelRef.current;
     if (channel) {
-      void sendSignal(channel, { client: clientId.current, kind: "hangup" }).finally(() => {
+      void waitReady(600).then(() =>
+        sendSignal(channel, { client: clientId.current, kind: "hangup" }),
+      ).finally(() => {
         finishRef.current(direction);
       });
-      window.setTimeout(() => finishRef.current(direction), 450);
+      window.setTimeout(() => finishRef.current(direction), 900);
     } else {
       finishRef.current(direction);
     }
@@ -311,10 +332,15 @@ export function CallOverlay({
 
   // Сигналинг через Supabase Realtime.
   useEffect(() => {
+    let resolveReady: (() => void) | null = null;
+    readyRef.current = new Promise<void>((resolve) => {
+      resolveReady = resolve;
+    });
     const channel = subscribeCall(
       room,
       handleSignal,
       () => {
+        resolveReady?.();
         if (incoming || started.current) return;
         started.current = true;
         startRef.current();
@@ -407,7 +433,17 @@ export function CallOverlay({
   const routeLabel =
     outputId === "default"
       ? "Динамик"
-      : outputs.find((output) => output.deviceId === outputId)?.label ?? "Аудиовыход";
+      : outputId === EARPIECE_ID
+        ? "Верхний динамик"
+        : outputs.find((output) => output.deviceId === outputId)?.label ?? "Аудиовыход";
+
+  const outputOptions: AudioOutput[] = [
+    { deviceId: "default", label: "Динамик" },
+    { deviceId: EARPIECE_ID, label: "Верхний динамик" },
+    ...outputs.filter(
+      (output) => output.deviceId !== "default" && output.deviceId !== EARPIECE_ID,
+    ),
+  ];
 
   const ring = phase === "incoming" || phase === "calling";
 
@@ -460,7 +496,10 @@ export function CallOverlay({
               }
               animate(swipeX, 0, { type: "spring", stiffness: 420, damping: 32 });
             }}
-            className={cn("relative flex flex-col items-center", incoming && phase === "incoming" && "cursor-grab touch-pan-y active:cursor-grabbing")}
+            className={cn(
+              "relative flex h-full w-full flex-col items-center justify-center",
+              incoming && phase === "incoming" && "cursor-grab touch-pan-y active:cursor-grabbing",
+            )}
           >
             <div className="relative">
               {ring ? <span className="pulse-ring absolute inset-0 rounded-full border border-white/15" /> : null}
@@ -561,45 +600,79 @@ export function CallOverlay({
         )}
       </div>
 
+      <AnimatePresence>
       {routeOpen ? (
-        <div className="absolute inset-0 z-[96] flex items-end justify-center bg-black/60 px-3 pb-[max(12px,env(safe-area-inset-bottom,0px))] backdrop-blur-sm" onClick={() => setRouteOpen(false)}>
+        <div
+          className="absolute inset-0 z-[96] flex items-end justify-center bg-black/55 px-0 pb-0 backdrop-blur-[3px]"
+          onClick={() => setRouteOpen(false)}
+        >
           <motion.div
-            initial={{ y: 44, opacity: 0 }}
-            animate={{ y: 0, opacity: 1 }}
-            transition={{ type: "spring", stiffness: 380, damping: 32 }}
+            initial={{ y: "100%" }}
+            animate={{ y: 0 }}
+            exit={{ y: "100%" }}
+            transition={{ type: "spring", stiffness: 420, damping: 42, mass: 0.7 }}
             onClick={(event) => event.stopPropagation()}
-            className="w-full max-w-[420px] overflow-hidden rounded-[26px] border border-white/10 bg-[#151517] p-3 shadow-[0_-20px_80px_rgba(0,0,0,0.7)]"
+            drag="y"
+            dragConstraints={{ top: 0, bottom: 0 }}
+            dragElastic={{ top: 0, bottom: 0.4 }}
+            onDragEnd={(_, info) => {
+              if (info.offset.y > 80 || info.velocity.y > 600) setRouteOpen(false);
+            }}
+            className="w-full max-w-[520px] overflow-hidden rounded-t-[28px] border-t border-white/10 bg-[#111113] pb-[max(18px,env(safe-area-inset-bottom,0px))] shadow-[0_-30px_80px_rgba(0,0,0,0.8)]"
           >
-            <div className="mx-auto mb-4 mt-1 h-1 w-10 rounded-full bg-white/[0.18]" />
-            <div className="px-2 pb-2">
+            <div className="flex cursor-grab justify-center pt-2.5 pb-1 active:cursor-grabbing">
+              <span className="h-1 w-9 rounded-full bg-white/20" />
+            </div>
+            <div className="px-5 pb-2 pt-2">
               <p className="text-[17px] font-semibold text-white">Звук звонка</p>
-              <p className="mt-1 text-[12px] leading-snug text-white/45">
-                {sinkSupported ? "Куда выводить голос собеседника" : "Браузер использует системный маршрут — выбор недоступен"}
+              <p className="mt-1 text-[12.5px] leading-snug text-white/45">
+                {sinkSupported
+                  ? "Куда выводить голос собеседника"
+                  : "Браузер сам выбирает маршрут — переключение может быть недоступно"}
               </p>
             </div>
-            <div className="space-y-1">
-              {[{ deviceId: "default", label: "Динамик" }, ...outputs.filter((output) => output.deviceId !== "default")].map((option) => {
+            <div className="space-y-1 px-3">
+              {outputOptions.map((option) => {
                 const active = option.deviceId === outputId;
                 return (
                   <button
                     key={option.deviceId}
                     type="button"
                     onClick={() => { void chooseOutput(option.deviceId); }}
-                    className={cn("flex w-full items-center gap-3 rounded-[14px] px-3 py-3 text-left transition-colors", active ? "bg-white/[0.08]" : "hover:bg-white/[0.05]")}
+                    className={cn(
+                      "flex w-full items-center gap-3 rounded-[15px] px-3 py-3 text-left transition-colors",
+                      active ? "bg-white/[0.09]" : "hover:bg-white/[0.05]",
+                    )}
                   >
-                    <span className={cn("grid size-9 shrink-0 place-items-center rounded-full", active ? "bg-white text-black" : "bg-white/8 text-white/70")}>
+                    <span
+                      className={cn(
+                        "grid size-9 shrink-0 place-items-center rounded-full transition-colors",
+                        active ? "bg-white text-black" : "bg-white/8 text-white/70",
+                      )}
+                    >
                       <OutputIcon label={option.label} />
                     </span>
-                    <span className="min-w-0 flex-1 truncate text-[14px] text-white/85">{option.label}</span>
+                    <span className="min-w-0 flex-1 truncate text-[14.5px] text-white/85">
+                      {option.label}
+                    </span>
                     {active ? <Check size={17} className="shrink-0 text-white" /> : null}
                   </button>
                 );
               })}
             </div>
-            <button type="button" onClick={() => setRouteOpen(false)} className="mt-3 h-11 w-full rounded-[14px] bg-white/8 text-[14px] font-medium text-white/80 transition-colors hover:bg-white/12">Готово</button>
+            <div className="px-3 pt-3">
+              <button
+                type="button"
+                onClick={() => setRouteOpen(false)}
+                className="h-12 w-full rounded-[15px] bg-white/8 text-[14.5px] font-medium text-white/85 transition-colors hover:bg-white/12"
+              >
+                Готово
+              </button>
+            </div>
           </motion.div>
         </div>
       ) : null}
+      </AnimatePresence>
     </motion.div>
   );
 }

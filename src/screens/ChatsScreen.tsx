@@ -192,8 +192,6 @@ export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => vo
     const q = query.trim().toLowerCase();
     const filtered = q ? state.chats.filter((chat) => chat.name.toLowerCase().includes(q) || (chat.username ?? "").toLowerCase().includes(q) || (chat.email ?? "").toLowerCase().includes(q) || chat.messages.some((m) => (m.text ?? "").toLowerCase().includes(q))) : state.chats;
     return [...filtered].sort((a, b) => {
-      if (a.id === "c_saved") return -1;
-      if (b.id === "c_saved") return 1;
       if (Boolean(a.pinnedChat) !== Boolean(b.pinnedChat)) return a.pinnedChat ? -1 : 1;
       const aAt = a.messages[a.messages.length - 1]?.at ?? 0;
       const bAt = b.messages[b.messages.length - 1]?.at ?? 0;
@@ -217,9 +215,8 @@ export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => vo
     [people, knownEmails],
   );
 
-  const pinned = sorted.filter((chat) => chat.pinnedChat && !chat.saved);
-  const regular = sorted.filter((chat) => !chat.pinnedChat && !chat.saved);
-  const saved = sorted.find((chat) => chat.saved || chat.id === "c_saved");
+  const pinned = sorted.filter((chat) => chat.pinnedChat);
+  const regular = sorted.filter((chat) => !chat.pinnedChat);
   const searching = query.trim().length > 0;
 
   const pick = (contact: Contact) => {
@@ -296,12 +293,6 @@ export function ChatsScreen({ onOpenChat }: { onOpenChat: (chatId: string) => vo
           </div>
         ) : (
           <>
-            {saved && !searching && (
-              <div className="mt-2">
-                <ChatRow chat={saved} open={openRow === saved.id} onOpen={() => setOpenRow(saved.id)} onClose={() => setOpenRow(null)} onChat={() => onOpenChat(saved.id)} onMenu={(x, y) => openMenu(saved, x, y)} onReadAll={markAllRead} />
-              </div>
-            )}
-
             {pinned.length > 0 ? (
               <div className="mt-2">
                 <div className="flex items-center gap-2 px-5 pb-1 pt-2">

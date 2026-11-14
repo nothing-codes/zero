@@ -116,10 +116,30 @@ body {
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
   overscroll-behavior: none;
+  /* Как в нативном приложении: интерфейс не выделяется при перетаскивании. */
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 #root {
   height: 100%;
+}
+
+/* Поля ввода и содержимое сообщений всё же можно выделять и копировать. */
+input,
+textarea,
+[contenteditable="true"],
+.selectable,
+.selectable * {
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+img,
+svg {
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 /* Оборачиваем базовые стили в @layer base, чтобы не перебивать компоненты */

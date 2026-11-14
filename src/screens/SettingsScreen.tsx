@@ -63,13 +63,18 @@ function deviceActivity(iso: string) {
   if (!Number.isFinite(at)) return "";
   const minutes = Math.max(0, Math.round((Date.now() - at) / 60_000));
   if (minutes < 2) return "в сети";
-  if (minutes < 60) return `${minutes} мин назад`;
+  if (minutes < 60) return `был(а) ${minutes} мин назад`;
   const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours} ч назад`;
+  if (hours < 24) return `был(а) ${hours} ч назад`;
   const days = Math.round(hours / 24);
-  if (days === 1) return "вчера";
-  if (days < 7) return `${days} дн назад`;
-  return new Date(at).toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
+  if (days === 1) return "был(а) вчера";
+  if (days < 7) return `был(а) ${days} дн назад`;
+  return `был(а) ${new Date(at).toLocaleDateString("ru-RU", { day: "numeric", month: "short" })}`;
+}
+
+/** Браузер устройства из старых записей вида «Chrome · Windows». */
+function deviceBrowser(row: DeviceRow) {
+  return row.name.split("·")[0].trim() || row.name;
 }
 
 function DeviceIcon({ platform }: { platform: string }) {
@@ -162,8 +167,8 @@ function DevicesPanel({ email, onNotice }: { email: string; onNotice: (text: str
       <Card>
         <SettingsRow
           icon={<Smartphone size={15} />}
-          label={current?.name || local.name}
-          hint={current ? `${current.platform} · ${deviceActivity(current.last_active)}` : local.platform}
+          label={current ? deviceBrowser(current) : local.name}
+          hint={`${current?.platform ?? local.platform} · ${current ? deviceActivity(current.last_active) : "в сети"}`}
           trailing={<span className="t-cap shrink-0 rounded-full bg-accent/15 px-2.5 py-1 text-accent">Это устройство</span>}
           last
         />
@@ -189,7 +194,7 @@ function DevicesPanel({ email, onNotice }: { email: string; onNotice: (text: str
             <SettingsRow
               key={row.id}
               icon={<DeviceIcon platform={row.platform} />}
-              label={row.name}
+              label={deviceBrowser(row)}
               hint={`${row.platform} · ${deviceActivity(row.last_active)}`}
               last={index === others.length - 1}
               trailing={
@@ -222,9 +227,6 @@ function DevicesPanel({ email, onNotice }: { email: string; onNotice: (text: str
         </div>
       ) : null}
 
-      <p className="t-sub mt-5 px-1 text-faint">
-        Завершённые сеансы выйдут из аккаунта, но история сообщений останется на этом устройстве.
-      </p>
     </>
   );
 }

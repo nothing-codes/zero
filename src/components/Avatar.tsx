@@ -8,16 +8,18 @@ export function PresenceDot({
   online?: boolean;
   className?: string;
 }) {
+  // Точка показывается только у людей в сети и всегда серая — как в шапке
+  // приложения. У офлайн-собеседников никакого кружка нет.
+  if (!online) return null;
   return (
     <span
       aria-hidden
       className={cn(
-        "presence-dot pointer-events-none absolute -right-0.5 -bottom-0.5 z-20 grid size-[15px] place-items-center rounded-full border-[2.5px] border-background",
-        online ? "bg-online" : "bg-faint",
+        "presence-dot pointer-events-none absolute -right-0.5 -bottom-0.5 z-20 grid size-[15px] place-items-center rounded-full border-[2.5px] border-background bg-foreground/45",
         className,
       )}
     >
-      {online ? <span className="presence-pulse absolute inset-0 rounded-full" /> : null}
+      <span className="presence-pulse absolute inset-0 rounded-full" />
     </span>
   );
 }
@@ -59,7 +61,7 @@ export function Avatar({
     <span
       aria-hidden
       className={cn(
-        "absolute inset-0 grid place-items-center rounded-full font-semibold tracking-[-0.03em] text-white transition-transform duration-500",
+        "absolute inset-0 grid place-items-center rounded-full text-center font-semibold leading-none tracking-[-0.03em] text-white transition-transform duration-500",
         active && "scale-[1.03]",
       )}
       style={{
@@ -89,7 +91,7 @@ export function Avatar({
             style={{ background: AVATAR_BACKGROUND }}
           />
           <span
-            className="relative z-10 select-none font-semibold tracking-[-0.03em] text-white"
+            className="relative z-10 flex size-full select-none items-center justify-center text-center font-semibold leading-none tracking-[-0.03em] text-white"
             style={{ fontSize: size * 0.4 }}
           >
             {letter}

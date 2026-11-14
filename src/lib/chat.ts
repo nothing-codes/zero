@@ -1,4 +1,4 @@
-import type { MessagePayload, User } from "../types";
+import type { MessagePayload, PinnedMusic, User } from "../types";
 import { decryptPayload, encryptPayload, isEncryptedPayload, publicKeyFor, refreshPeerKey } from "./e2ee";
 import { supabase } from "./supabase";
 
@@ -20,8 +20,10 @@ export interface ZeroProfile {
   username: string;
   name: string;
   avatar: string | null;
+  banner?: string | null;
   bio: string;
   status: string;
+  pinnedMusic?: PinnedMusic | null;
 }
 
 export interface RemoteMessageRow {
@@ -64,8 +66,10 @@ export async function upsertProfile(user: User): Promise<void> {
       username,
       name: user.name,
       avatar: user.avatar ?? null,
+      banner: user.banner ?? null,
       bio: user.bio ?? "",
       status: user.status ?? "",
+      pinned_music: user.pinnedMusic ?? null,
       public_key: publicKey,
       updated_at: new Date().toISOString(),
     },
@@ -88,20 +92,15 @@ export async function findRemoteAccount(
 
   const { data, error } = await supabase
     .from(PROFILE_TABLE)
-    .select("email,username,name,avatar,bio,status,created_at")
+    .select("email,username,name,avatar,banner,bio,status,pinned_music,created_at")
     .eq("email", normalized)
-    .maybeSingle<ZeroProfile & { created_at?: string }>();
+    .maybeSingle<Record<string, unknown>>();
 
   if (error) throw error;
   if (data) {
     return {
-      email: normalizeEmail(data.email),
-      username: normalizeUsername(data.username),
-      name: data.name || normalized.split("@")[0],
-      avatar: data.avatar ?? null,
-      bio: data.bio ?? "",
-      status: data.status ?? "",
-      createdAt: data.created_at ? new Date(data.created_at).getTime() : undefined,
+      ...normalizeProfileRow(data),
+      createdAt: data.created_at ? new Date(String(data.created_at)).getTime() : undefined,
     };
   }
 
@@ -176,13 +175,40 @@ export async function searchProfiles(
 
   const { data, error } = await supabase
     .from(PROFILE_TABLE)
-    .select("email,username,name,avatar,bio,status")
+    .select("email,username,name,avatar,banner,bio,status,pinned_music")
     .ilike("username", `%${q}%`)
     .neq("email", normalizeEmail(excludeEmail))
     .limit(20);
 
   if (error) throw error;
-  return (data ?? []) as ZeroProfile[];
+  return ((data ?? []) as Record<string, unknown>[]).map(normalizeProfileRow);
+}
+
+/** Приводит строку `zero_profiles` к виду профиля приложения. */
+export function normalizeProfileRow(row: Record<string, unknown>): ZeroProfile {
+  return {
+    email: normalizeEmail(String(row.email ?? "")),
+    username: normalizeUsername(String(row.username ?? "")),
+    name: String(row.name ?? row.username ?? ""),
+    avatar: (row.avatar as string | null) ?? null,
+    banner: (row.banner as string | null) ?? null,
+    bio: String(row.bio ?? ""),
+    status: String(row.status ?? ""),
+    pinnedMusic: (row.pinned_music as ZeroProfile["pinnedMusic"]) ?? null,
+  };
+}
+
+/** Публичный профиль по email — для карточки собеседника. */
+export async function loadProfile(email: string): Promise<ZeroProfile | null> {
+  const target = normalizeEmail(email);
+  if (!target) return null;
+  const { data, error } = await supabase
+    .from(PROFILE_TABLE)
+    .select("email,username,name,avatar,banner,bio,status,pinned_music")
+    .eq("email", target)
+    .maybeSingle<Record<string, unknown>>();
+  if (error) throw error;
+  return data ? normalizeProfileRow(data) : null;
 }
 
 /** Вся история диалога между двумя людьми, от старых к новым. */

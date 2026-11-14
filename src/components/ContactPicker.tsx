@@ -1,4 +1,4 @@
-import { Check, Loader2, Search } from "lucide-react";
+import { Loader2, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { searchProfiles, type ZeroProfile } from "../lib/chat";
 import type { Contact } from "../lib/data";
@@ -157,7 +157,6 @@ export function ContactPicker({
                 {contact.email ? ` · ${contact.email}` : ""}
               </span>
             </span>
-            <Check size={15} className="text-transparent" />
           </button>
         ))}
 

@@ -41,8 +41,9 @@ export function currentDeviceInfo() {
   const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
   const platform = detectPlatform(ua);
   const browser = detectBrowser(ua);
-  const name = browser ? `${browser} · ${platform}` : platform;
-  return { name, platform, appVersion: "0.1.0" };
+  // Название устройства — это браузер («Chrome»), система показывается
+  // отдельной строкой. Так список читается как в Telegram.
+  return { name: browser || platform, platform, browser, appVersion: "0.1.0" };
 }
 
 function detectPlatform(ua: string) {

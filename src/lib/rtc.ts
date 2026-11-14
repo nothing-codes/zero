@@ -61,8 +61,11 @@ export function subscribeCall(
   onSignal: (signal: CallSignal) => void,
   onReady?: () => void,
 ) {
+  // Публичный broadcast-канал: приватные каналы требуют JWT-сессии Supabase,
+  // а вход в приложение идёт по одноразовому коду без сохранения сессии.
+  // Именно из-за этого звонки раньше «висели» без соединения.
   const channel = supabase.channel(room, {
-    config: { private: true, broadcast: { self: false } },
+    config: { broadcast: { self: false } },
   });
   channel.on("broadcast", { event: "signal" }, ({ payload }) => {
     if (payload && typeof payload === "object") onSignal(payload as CallSignal);

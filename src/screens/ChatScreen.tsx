@@ -1,21 +1,22 @@
 import { AnimatePresence, animate, motion, useMotionValue, useTransform } from "motion/react";
 import {
-  ArrowDown, ArrowLeft, AtSign, BadgeCheck, Ban, BarChart3, Bookmark, Camera, Check, CheckCheck, ChevronDown, ChevronUp, Clock3, Copy, Download, Eraser, FileArchive, FileAudio, FileImage, FileSpreadsheet, FileText, FileVideo, File as FileIcon, Forward, Image as ImageIcon, Loader2, Mail, Megaphone, Mic, MoreVertical, Music2, Paperclip, Pause, Pencil, Phone, Pin, Play, Plus, Reply, Search, Send, Sticker, Trash2, UserPlus, Users, Video, X,
+  ArrowDown, ArrowLeft, BadgeCheck, Ban, BarChart3, Bookmark, Camera, Check, CheckCheck, ChevronDown, ChevronUp, Clock3, Copy, Download, Eraser, FileArchive, FileAudio, FileImage, FileSpreadsheet, FileText, FileVideo, File as FileIcon, Forward, Image as ImageIcon, Loader2, Mail, Megaphone, Mic, MoreVertical, Music2, Paperclip, Pause, Pencil, Phone, Pin, Play, Plus, Reply, Search, Send, Sticker, Trash2, UserPlus, Users, Video, X,
 } from "lucide-react";
 import {
   Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject,
 } from "react";
 import { Avatar } from "../components/Avatar";
 import { ContactPicker } from "../components/ContactPicker";
-import { MapArt, PhotoArt } from "../components/media";
-import { MusicBubble } from "../components/Music";
+import { MapArt } from "../components/media";
+import { MusicBubble, PinnedMusicPlayer } from "../components/Music";
+import { BannerVisual } from "../components/ProfileBanner";
 import { PeoplePicker } from "../components/PeoplePicker";
 import { PhotoEditor, type EditedImage } from "../components/PhotoEditor";
 import { Button, ContextMenu, IconButton, Sheet, SettingsRow } from "../components/ui";
 import {
   downloadFileBlob, pickZeroDirectory, saveImageToGallery, triggerBlobDownload, uploadFileToCloud, writeBlobToDirectory,
 } from "../lib/files";
-import { normalizeEmail, normalizeUsername, searchProfiles, type ZeroProfile } from "../lib/chat";
+import { loadProfile, normalizeEmail, normalizeUsername, searchProfiles, type ZeroProfile } from "../lib/chat";
 import { decryptBlob } from "../lib/e2ee";
 import { isZeroIdentity } from "../lib/identity";
 import { useMediaSrc } from "../lib/useMediaSrc";
@@ -40,6 +41,26 @@ function previewOf(message?: Message) {
     case "poll": return message.poll?.question || "Опрос";
     default: return message.text || "";
   }
+}
+
+/**
+ * Загрузка вложения с повторами: короткий обрыв сети раньше «терял» фото и
+ * голосовые — сообщение уходило со ссылкой, которую собеседник не открывал.
+ */
+async function uploadMediaSafe(
+  blob: Blob,
+  kind: "voice" | "videoNote" | "photo",
+): Promise<{ url: string; enc: MediaEncryption }> {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      return await uploadMedia(blob, kind);
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => window.setTimeout(resolve, 600 * (attempt + 1)));
+    }
+  }
+  throw lastError ?? new Error("upload-failed");
 }
 
 const MENTION_SPLIT = /(@[a-zA-Z0-9_]{2,24})/g;
@@ -217,6 +238,38 @@ function Meta({ message, mine }: { message: Message; mine: boolean }) {
   );
 }
 
+/** Волновые «палочки» для голосового сообщения в чате. */
+function WaveBars({
+  values,
+  progress = 0,
+  className,
+}: {
+  values: number[];
+  progress?: number;
+  className?: string;
+}) {
+  const bars = useMemo(
+    () => (values.length >= 8 ? values.slice(0, 34) : makeWave(17, 34)),
+    [values],
+  );
+  const active = Math.round(Math.max(0, Math.min(1, progress)) * bars.length);
+  return (
+    <div className={cn("flex h-9 w-full items-center gap-[2px]", className)} aria-hidden>
+      {bars.map((value, index) => (
+        <span
+          key={index}
+          className="min-w-0 flex-1 rounded-full transition-opacity duration-150"
+          style={{
+            height: `${Math.max(12, Math.min(100, value * 100))}%`,
+            backgroundColor: "currentColor",
+            opacity: index < active ? 1 : 0.35,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 function VoiceBubble({ message, mine }: { message: Message; mine: boolean }) {
   const voice = message.voice!;
   const mediaSrc = useMediaSrc(voice.src, voice.enc);
@@ -289,7 +342,7 @@ function VoiceBubble({ message, mine }: { message: Message; mine: boolean }) {
         {playing ? <Pause size={15} fill="currentColor" /> : <Play size={15} className="ml-0.5" fill="currentColor" />}
       </button>
       <div role="slider" tabIndex={0} onClick={seek} className="relative flex h-9 flex-1 cursor-pointer items-center">
-        <WaveShape values={voice.waveform} progress={progress} height={32} className={mine ? "text-primary-foreground" : "text-foreground/85"} />
+        <WaveBars values={voice.waveform} progress={progress} className={mine ? "text-primary-foreground" : "text-foreground/85"} />
       </div>
       <span className={cn("t-time w-8 shrink-0 text-right", failed ? "text-danger" : "opacity-60")}>
         {failed ? "!" : fmtDuration(shown)}
@@ -389,7 +442,7 @@ function VideoNoteBubble({ message, mine }: { message: Message; mine: boolean })
             onEnded={() => { setPlaying(false); setProgress(0); }}
           />
         ) : (
-          <PhotoArt seed={note.seed} className="size-full" />
+          <div className="size-full bg-foreground/[0.06]" />
         )}
         {!playing || failed ? (
           <span className="absolute inset-0 grid place-items-center bg-background/25 backdrop-blur-[1px]">
@@ -615,7 +668,12 @@ function MessageBubble({
     if (message.kind === "sticker") return (
       <div className="flex flex-col items-end">
         {message.sticker ? (
-          <img src={message.sticker} alt="Стикер" draggable={false} className="size-[132px] object-contain drop-shadow-md" />
+          <img
+            src={message.sticker}
+            alt="Стикер"
+            draggable={false}
+            className="h-[150px] w-[150px] object-contain"
+          />
         ) : (
           <span className="t-time text-faint">Стикер</span>
         )}
@@ -624,7 +682,13 @@ function MessageBubble({
     );
     if (message.kind === "photo") return (
       <div className={cn("max-w-[286px] overflow-hidden p-1.5", bubbleRadius, bubbleTone)}>
-        <div className="block w-full overflow-hidden rounded-[14px]">{photoSrc ? <img src={photoSrc} alt="" draggable={false} onLoad={onMediaLoad} className="max-h-[340px] w-full object-cover" /> : <PhotoArt seed={message.photo?.seed ?? 1} wide={message.photo?.wide} className="aspect-[4/5] w-full" />}</div>
+        <div className="block w-full overflow-hidden rounded-[14px]">
+          {photoSrc ? (
+            <img src={photoSrc} alt="" draggable={false} onLoad={onMediaLoad} className="max-h-[340px] w-full object-cover" />
+          ) : (
+            <div className="aspect-[4/5] w-full bg-foreground/[0.045]" />
+          )}
+        </div>
         {message.photo?.caption ? <p className="bubble-text px-1.5 pb-0.5 pt-2 text-[14px] leading-snug"><RichText text={message.photo.caption} query={highlight} onMention={onMention} /></p> : null}
         <div className="px-1.5"><Meta message={message} mine={mine} /></div>
       </div>
@@ -810,6 +874,10 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
   const [addMemberOpen, setAddMemberOpen] = useState(false);
   const [newMembers, setNewMembers] = useState<GroupMember[]>([]);
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState(false);
+  const [editGroupOpen, setEditGroupOpen] = useState(false);
+  const [groupName, setGroupName] = useState(chat.name);
+  const [groupDescription, setGroupDescription] = useState(chat.group?.description ?? "");
+  const [peerProfile, setPeerProfile] = useState<ZeroProfile | null>(null);
   const [mention, setMention] = useState<{ query: string; start: number } | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
   const [mentionResults, setMentionResults] = useState<ZeroProfile[]>([]);
@@ -1269,6 +1337,22 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
     return () => window.clearInterval(timer);
   }, [chat.online, chat.lastSeen]);
 
+  // Профиль собеседника (фон, музыка, био) хранится в `zero_profiles`.
+  useEffect(() => {
+    if (!profileOpen || isGroup || isSaved) return;
+    const email = chat.email;
+    if (!email) return;
+    let active = true;
+    void loadProfile(email)
+      .then((profile) => {
+        if (active && profile) setPeerProfile(profile);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [profileOpen, chat.email, isGroup, isSaved]);
+
   useEffect(() => {
     if (!editTarget) return;
     const frame = window.requestAnimationFrame(() => {
@@ -1319,10 +1403,12 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
       let src = edited.dataUrl;
       let enc: MediaEncryption | undefined;
       try {
-        const uploaded = await uploadMedia(edited.blob, "photo");
+        const uploaded = await uploadMediaSafe(edited.blob, "photo");
         src = uploaded.url;
         enc = uploaded.enc;
-      } catch { /* офлайн или нет бакета */ }
+      } catch {
+        notify("Фото отправим напрямую — загрузка недоступна");
+      }
       sendMessage(chat.id, { kind: "photo", photo: { seed: Math.floor(Math.random() * 900) + 1, src, enc, wide: image.width > image.height * 1.2, caption: "" }, replyTo: replyTo?.id });
       setReplyTo(null); setAttachOpen(false); notify("Фотография отправлена");
     } catch { notify("Не удалось открыть изображение"); }
@@ -1453,9 +1539,9 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
       notify(session.kind === "voice" ? "Голосовое отправлено" : "Кружок отправлен");
 
       if (!messageId) return;
-      void uploadMedia(blob, session.kind)
+      void uploadMediaSafe(blob, session.kind)
         .then((uploaded) => setMessageMediaSource(chat.id, messageId, session.kind, uploaded.url, uploaded.enc))
-        .catch(() => notify("Не удалось загрузить медиа — собеседник его не получит"));
+        .catch(() => notify("Не удалось загрузить медиа — попробуйте ещё раз"));
     };
 
     media.recorder.onstop = finalize;
@@ -1586,6 +1672,9 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
     // записи или системный запрос доступа, события могут не дойти до кнопки.
     const onRelease = (native: PointerEvent) => {
       if (native.pointerId !== pointerId) return;
+      // Финальная позиция важна: если палец отпущен сразу после свайпа,
+      // pointermove мог не успеть прийти, и отмена бы не сработала.
+      updateCancelMark(native.clientX, native.clientY);
       endHoldRecording();
     };
     const onCancel = (native: PointerEvent) => {
@@ -1594,6 +1683,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
     };
     const onMove = (native: PointerEvent) => {
       if (native.pointerId !== pointerId) return;
+      if (hold.started) native.preventDefault();
       updateCancelMark(native.clientX, native.clientY);
     };
     hold.cleanup = () => {
@@ -1603,7 +1693,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
     };
     window.addEventListener("pointerup", onRelease);
     window.addEventListener("pointercancel", onCancel);
-    window.addEventListener("pointermove", onMove, { passive: true });
+    window.addEventListener("pointermove", onMove, { passive: false });
 
     hold.timer = window.setTimeout(() => {
       if (holdRef.current !== hold) return;
@@ -1619,7 +1709,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
       const dy = clientY - active.startY;
       // Отмена срабатывает только при отпускании: пока палец влево — показываем
       // предупреждение, но запись продолжается и её можно «вернуть» движением.
-      const shouldCancel = dx < -68 && Math.abs(dy) < Math.abs(dx) * 1.3;
+      const shouldCancel = dx < -48 && Math.abs(dy) < Math.abs(dx) * 2 + 24;
       if (recCancel.current === shouldCancel) return;
       recCancel.current = shouldCancel;
       setRecCancelled(shouldCancel);
@@ -1727,7 +1817,6 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
                 {chat.verified ? <BadgeCheck size={16} className="shrink-0 text-foreground/55" strokeWidth={1.9} /> : null}
               </span>
               <span className="t-sub mt-0.5 flex items-center gap-1.5 text-faint">
-                {chat.online && !isGroup ? <span className="size-1.5 rounded-full bg-online" /> : null}
                 <span className="truncate">{chat.typing ? "печатает…" : onlineLabel}</span>
               </span>
             </span>
@@ -1861,33 +1950,54 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
       </AnimatePresence>
 
       <div className="relative z-20 shrink-0 border-t border-foreground/8 bg-background/95 pb-[max(8px,env(safe-area-inset-bottom,0px))] pl-2 pr-2 backdrop-blur-xl">
-        {mention && mentionOptions.length > 0 ? (
-          <div className="mb-1 max-h-[232px] overflow-y-auto overscroll-contain rounded-[18px] border border-foreground/8 bg-card/95 p-1 shadow-xl backdrop-blur">
-            <div className="flex items-center justify-between px-2 py-1">
-              <span className="t-cap text-faint">Упомянуть</span>
-              {mentionLoading ? <Loader2 size={12} className="animate-spin text-faint" /> : null}
-            </div>
-            {mentionOptions.map((option, index) => (
-              <button
-                key={option.username}
-                type="button"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() => applyMention(option.username)}
-                className={cn(
-                  "flex w-full items-center gap-2.5 rounded-[13px] px-2 py-2 text-left transition-colors",
-                  index === mentionIndex ? "bg-foreground/10" : "hover:bg-foreground/5",
-                )}
-              >
-                <Avatar name={option.name} src={option.avatar} size={32} />
-                <span className="min-w-0 flex-1">
-                  <span className="t-sub block truncate font-medium">{option.name}</span>
-                  <span className="t-time block truncate text-faint">@{option.username}</span>
-                </span>
-                <AtSign size={14} className="shrink-0 text-faint" />
-              </button>
-            ))}
-          </div>
-        ) : null}
+        <AnimatePresence>
+          {mention && mentionOptions.length > 0 ? (
+            <motion.div
+              initial={{ opacity: 0, y: 10, scale: 0.985 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 8, scale: 0.99 }}
+              transition={{ type: "spring", stiffness: 460, damping: 34, mass: 0.7 }}
+              className="absolute inset-x-2 bottom-full z-30 mb-2 overflow-hidden rounded-[20px] border border-foreground/10 bg-card/95 shadow-[0_20px_54px_-14px_rgba(0,0,0,0.6)] backdrop-blur-xl"
+            >
+              <div className="max-h-[236px] overflow-y-auto overscroll-contain p-1.5">
+                {mentionOptions.map((option, index) => (
+                  <button
+                    key={option.username}
+                    type="button"
+                    onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => applyMention(option.username)}
+                    className={cn(
+                      "flex w-full items-center gap-3 rounded-[14px] px-2 py-1.5 text-left transition-colors duration-150",
+                      index === mentionIndex ? "bg-foreground/[0.08]" : "hover:bg-foreground/[0.04]",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "shrink-0 rounded-full transition-shadow duration-200",
+                        index === mentionIndex
+                          ? "shadow-[0_0_0_2px_var(--card),0_0_0_3.5px_color-mix(in_oklch,var(--foreground)_45%,transparent)]"
+                          : "",
+                      )}
+                    >
+                      <Avatar name={option.name} src={option.avatar} size={34} />
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="t-body block truncate font-medium leading-tight">{option.name}</span>
+                      <span className="t-sub mt-0.5 block truncate text-faint">@{option.username}</span>
+                    </span>
+                    {index === mentionIndex ? (
+                      <span className="t-time shrink-0 rounded-full bg-foreground/8 px-2 py-1 text-foreground/50">Enter</span>
+                    ) : null}
+                  </button>
+                ))}
+              </div>
+              <div className="flex items-center justify-between border-t border-foreground/6 px-3 py-1.5">
+                <span className="t-time text-faint">↑↓ — выбрать, Enter — вставить</span>
+                {mentionLoading ? <Loader2 size={12} className="animate-spin text-faint" /> : null}
+              </div>
+            </motion.div>
+          ) : null}
+        </AnimatePresence>
 
         {canPost ? (
           <>
@@ -1953,9 +2063,9 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
                   type="button"
                   onClick={() => { setMention(null); setStickerOpen(true); haptic(4); }}
                   aria-label="Стикеры"
-                  className="mb-[4px] mr-[4px] grid size-[32px] shrink-0 place-items-center rounded-full bg-[#1c1c1e] text-white/85 transition-transform active:scale-90"
+                  className="mb-[5px] mr-[5px] grid size-[30px] shrink-0 place-items-center rounded-full bg-[#1c1c1e] text-white/80 shadow-[inset_0_1px_0_rgba(255,255,255,0.09)] transition-[transform,color,background-color] duration-200 hover:bg-[#26262a] hover:text-white active:scale-90"
                 >
-                  <Sticker size={17} />
+                  <Sticker size={17} strokeWidth={1.7} />
                 </button>
               </div>
 
@@ -2128,6 +2238,20 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
                 <Button
                   variant="secondary"
                   className="flex w-full items-center justify-center gap-2"
+                  onClick={() => {
+                    setGroupName(chat.name);
+                    setGroupDescription(chat.group?.description ?? "");
+                    setProfileOpen(false);
+                    window.setTimeout(() => setEditGroupOpen(true), 160);
+                  }}
+                >
+                  <Pencil size={15} /> Редактировать {isChannel ? "канал" : "группу"}
+                </Button>
+              ) : null}
+              {isOwner ? (
+                <Button
+                  variant="secondary"
+                  className="flex w-full items-center justify-center gap-2"
                   onClick={() => { setProfileOpen(false); window.setTimeout(() => setAddMemberOpen(true), 160); }}
                 >
                   <UserPlus size={15} /> Добавить участника
@@ -2156,15 +2280,43 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
           </>
         ) : (
           <>
-            <div className="flex flex-col items-center pb-3 text-center">
-              <Avatar name={chat.name} src={chat.avatar} size={96} />
-              <p className="t-h mt-4 flex items-center justify-center gap-1.5">
-                <span className="truncate">{chat.name}</span>
+            <div className="relative -mx-5 -mt-1 mb-[-44px] h-[136px] overflow-hidden">
+              <BannerVisual banner={peerProfile?.banner ?? null} />
+              <span
+                aria-hidden
+                className="pointer-events-none absolute inset-0"
+                style={{
+                  background:
+                    "linear-gradient(to top, var(--card) 0%, color-mix(in oklch, var(--card) 58%, transparent) 26%, transparent 68%)",
+                }}
+              />
+            </div>
+
+            <div className="relative flex flex-col items-center pb-3 text-center">
+              <div className="rounded-full bg-card p-1">
+                <Avatar name={chat.name} src={peerProfile?.avatar ?? chat.avatar} size={96} />
+              </div>
+              <p className="t-h mt-3 flex items-center justify-center gap-1.5">
+                <span className="truncate">{peerProfile?.name || chat.name}</span>
                 {chat.verified ? <BadgeCheck size={18} className="shrink-0 text-foreground/60" strokeWidth={1.9} /> : null}
               </p>
-              {chat.username ? <p className="t-sub mt-1 text-faint">@{chat.username}</p> : null}
-              <p className="t-sub mt-1 text-faint">{onlineLabel}</p>
+              {(peerProfile?.username || chat.username) ? (
+                <p className="t-sub mt-1 text-faint">@{peerProfile?.username || chat.username}</p>
+              ) : null}
+              <p className="t-sub mt-1 text-faint">{peerProfile?.status || onlineLabel}</p>
             </div>
+
+            {peerProfile?.pinnedMusic ? (
+              <div className="mt-1">
+                <PinnedMusicPlayer track={peerProfile.pinnedMusic} />
+              </div>
+            ) : null}
+
+            {peerProfile?.bio?.trim() ? (
+              <p className="t-body mt-3 rounded-[16px] border border-foreground/8 bg-foreground/[0.02] px-4 py-3 text-foreground/85">
+                {peerProfile.bio}
+              </p>
+            ) : null}
 
             <div className="mt-4 overflow-hidden rounded-[16px] border border-foreground/8 bg-foreground/[0.02]">
               <div className="flex items-center gap-3 px-4 py-3.5">
@@ -2206,7 +2358,18 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
           <SettingsRow icon={<Search size={15} />} label="Поиск по чату" onClick={() => { setMenuOpen(false); setSearchOpen(true); }} />
           {isGroup ? <SettingsRow icon={<Users size={15} />} label="Информация" onClick={() => { setMenuOpen(false); setProfileOpen(true); }} /> : null}
           {isGroup && isOwner ? <SettingsRow icon={<UserPlus size={15} />} label="Добавить участника" onClick={() => { setMenuOpen(false); window.setTimeout(() => setAddMemberOpen(true), 160); }} /> : null}
-          {isGroup && isOwner ? <SettingsRow icon={<Camera size={15} />} label="Изменить фото" onClick={() => { setMenuOpen(false); window.setTimeout(() => groupPhotoInput.current?.click(), 160); }} /> : null}
+          {isGroup && isOwner ? (
+            <SettingsRow
+              icon={<Pencil size={15} />}
+              label={isChannel ? "Редактировать канал" : "Редактировать группу"}
+              onClick={() => {
+                setGroupName(chat.name);
+                setGroupDescription(chat.group?.description ?? "");
+                setMenuOpen(false);
+                window.setTimeout(() => setEditGroupOpen(true), 160);
+              }}
+            />
+          ) : null}
           <SettingsRow icon={<Eraser size={15} />} label="Очистить историю" onClick={() => { setMenuOpen(false); setConfirmClear(true); }} />
           {isGroup && isOwner ? (
             <SettingsRow icon={<Trash2 size={15} />} label={isChannel ? "Удалить канал" : "Удалить группу"} danger last onClick={() => { setMenuOpen(false); setConfirmDeleteGroup(true); }} />
@@ -2248,6 +2411,77 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
       </Sheet>
 
       <Sheet
+        open={editGroupOpen}
+        onClose={() => setEditGroupOpen(false)}
+        title={isChannel ? "Редактировать канал" : "Редактировать группу"}
+      >
+        <div className="flex items-center gap-4 pb-5">
+          <button
+            type="button"
+            onClick={() => groupPhotoInput.current?.click()}
+            className="relative rounded-full"
+            aria-label="Изменить фото"
+          >
+            <Avatar name={groupName || chat.name} src={chat.avatar} size={72} />
+            <span className="absolute -bottom-0.5 -right-0.5 grid size-6 place-items-center rounded-full border-2 border-card bg-primary text-primary-foreground">
+              <Camera size={11} />
+            </span>
+          </button>
+          <div className="min-w-0 flex-1">
+            <p className="t-body font-medium">Фото</p>
+            <p className="t-sub mt-0.5 text-faint">Нажмите, чтобы заменить</p>
+          </div>
+        </div>
+
+        <div className="space-y-4 pb-5">
+          <div>
+            <label className="t-cap block text-faint" htmlFor="edit-group-name">
+              Название
+            </label>
+            <input
+              id="edit-group-name"
+              value={groupName}
+              onChange={(event) => setGroupName(event.target.value)}
+              maxLength={64}
+              className="field mt-2"
+            />
+          </div>
+          <div>
+            <label className="t-cap block text-faint" htmlFor="edit-group-description">
+              Описание
+            </label>
+            <textarea
+              id="edit-group-description"
+              value={groupDescription}
+              onChange={(event) => setGroupDescription(event.target.value)}
+              rows={3}
+              maxLength={180}
+              placeholder="Необязательно"
+              className="field mt-2 h-auto resize-none py-3.5"
+            />
+          </div>
+        </div>
+
+        <div className="pb-2">
+          <Button
+            className="w-full"
+            disabled={groupName.trim().length < 2}
+            onClick={() => {
+              updateGroup(chat.id, {
+                name: groupName.trim(),
+                description: groupDescription.trim(),
+              });
+              setEditGroupOpen(false);
+              notify(isChannel ? "Канал обновлён" : "Группа обновлена");
+              haptic(8);
+            }}
+          >
+            Сохранить
+          </Button>
+        </div>
+      </Sheet>
+
+      <Sheet
         open={addMemberOpen}
         onClose={() => { setAddMemberOpen(false); setNewMembers([]); }}
         title="Добавить участника"
@@ -2281,7 +2515,8 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat }: { chat: Chat; onBack: ()
         title={isChannel ? "Удалить канал?" : "Удалить группу?"}
       >
         <p className="t-body pb-5 text-muted-foreground">
-          Чат исчезнет из вашего списка. У участников останется их локальная история.
+          {isChannel ? "Канал" : "Группа"} и все её сообщения будут удалены без возможности
+          восстановления.
         </p>
         <div className="flex gap-2 pb-2">
           <Button variant="secondary" className="flex-1" onClick={() => setConfirmDeleteGroup(false)}>Отмена</Button>

@@ -156,7 +156,9 @@ export function App() {
   }, [user]);
 
   useEffect(() => {
-    if (!user) return;
+    // Пока звонок открыт, его канал обслуживает CallOverlay — второй
+    // подписчик на ту же тему только мешает сигналингу.
+    if (!user || call) return;
     const rooms = new Set([callRoom(user.username), callRoom(user.name)]);
     const channels = [...rooms].map((room) =>
       subscribeCall(room, (signal) => {
@@ -192,7 +194,7 @@ export function App() {
         void supabase.removeChannel(channel);
       });
     };
-  }, [user, openOrCreateChat, pushUiEntry]);
+  }, [user, call, openOrCreateChat, pushUiEntry]);
 
   const openChat = (chatId: string) => {
     haptic(4);
