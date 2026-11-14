@@ -142,6 +142,8 @@ export interface Message {
   pinned?: boolean;
   fresh?: boolean;
   edited?: boolean;
+  /** Служебная запись (например, приглашение в группу) — не показывается в чате. */
+  system?: boolean;
   sender?: string;
   /** Аватар отправителя (для групповых сообщений). */
   senderAvatar?: string | null;
@@ -166,6 +168,8 @@ export interface MessagePayload {
   replyTo?: string;
   forwardedFrom?: string;
   edited?: boolean;
+  /** Служебная запись — только для синхронизации группы/канала. */
+  system?: boolean;
   /** Описание группы/канала — едет внутри зашифрованного payload. */
   group?: MessageGroupInfo;
 }

@@ -399,6 +399,7 @@ function payloadOf(message: Message, chat?: Chat): MessagePayload {
     replyTo: message.replyTo,
     forwardedFrom: message.forwardedFrom,
     edited: message.edited,
+    system: message.system,
     group: chat ? groupInfoOf(chat) : message.group,
   };
 }
@@ -1765,6 +1766,35 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [commit],
   );
 
+  /**
+   * Приглашение в группу/канал: каждому участнику уходит служебная запись с
+   * описанием группы. Благодаря ей чат появляется сразу после добавления, а
+   * не только после первого сообщения.
+   */
+  const shareGroupWithMembers = useCallback(
+    (chatId: string, members: GroupMember[]) => {
+      const current = stateRef.current.user;
+      const chat = stateRef.current.chats.find((item) => item.id === chatId);
+      const group = chat ? groupInfoOf(chat) : undefined;
+      if (!current?.email || !group) return;
+      const payload: MessagePayload = { kind: "text", text: "", system: true, group };
+      for (const member of members) {
+        const email = normalizeEmail(member.email);
+        if (!email || email === normalizeEmail(current.email)) continue;
+        void sendRemoteMessage({
+          from: current,
+          toEmail: email,
+          toUsername: member.username ?? "",
+          toName: member.name || email.split("@")[0],
+          payload,
+          clientId: uid("m"),
+          at: Date.now(),
+        }).catch(() => undefined);
+      }
+    },
+    [],
+  );
+
   const createGroup = useCallback(
     (input: {
       name: string;
@@ -1801,9 +1831,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         },
       };
       commit((prev) => ({ ...prev, chats: [chat, ...prev.chats] }));
+      shareGroupWithMembers(id, memberList);
       return id;
     },
-    [commit],
+    [commit, shareGroupWithMembers],
   );
 
   const updateGroup = useCallback(
@@ -1824,23 +1855,36 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           };
         }),
       }));
+      // Новое название/аватар/описание сразу видны всем участникам.
+      const chat = stateRef.current.chats.find((item) => item.id === chatId);
+      if (chat?.group?.memberList?.length) shareGroupWithMembers(chatId, chat.group.memberList);
     },
-    [commit],
+    [commit, shareGroupWithMembers],
   );
 
   const addGroupMembers = useCallback(
     (chatId: string, members: GroupMember[]) => {
       const ownerEmail = normalizeEmail(stateRef.current.user?.email ?? "");
+      const chat = stateRef.current.chats.find((item) => item.id === chatId);
+      const known = new Set(
+        (chat?.group?.memberList ?? []).map((member) => normalizeEmail(member.email)),
+      );
+      const added = members.filter((member) => {
+        const email = normalizeEmail(member.email);
+        if (!email || email === ownerEmail || known.has(email)) return false;
+        known.add(email);
+        return true;
+      });
       commit((prev) => ({
         ...prev,
         chats: prev.chats.map((chat) => {
           if (chat.id !== chatId || !chat.group) return chat;
           const list = [...(chat.group.memberList ?? [])];
-          const known = new Set(list.map((member) => normalizeEmail(member.email)));
+          const knownInList = new Set(list.map((member) => normalizeEmail(member.email)));
           for (const member of members) {
             const email = normalizeEmail(member.email);
-            if (!email || email === ownerEmail || known.has(email)) continue;
-            known.add(email);
+            if (!email || email === ownerEmail || knownInList.has(email)) continue;
+            knownInList.add(email);
             list.push({ ...member, email });
           }
           return {
@@ -1850,8 +1894,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           };
         }),
       }));
+      if (added.length > 0) shareGroupWithMembers(chatId, added);
     },
-    [commit],
+    [commit, shareGroupWithMembers],
   );
 
   const removeGroupMember = useCallback(
@@ -1983,6 +2028,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         rows = lists
           .flat()
           .filter((row) => row.payload.group?.key === groupKey)
+          .filter((row) => !row.payload.system)
           .filter((row) => {
             const key = row.client_id || `${row.sender_email}|${row.created_at}|${row.id}`;
             if (seen.has(key)) return false;
@@ -2115,6 +2161,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             const messages = [...chat.messages];
 
             for (const row of list) {
+              if (row.payload.system) continue;
               const own = normalizeEmail(row.sender_email) === email;
               const remoteId = row.id;
               const clientId = row.client_id || undefined;
@@ -2207,6 +2254,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 online: true,
                 remote: true,
               });
+          // Служебная запись только создаёт/обновляет группу, но не является
+          // сообщением в ленте.
+          if (decrypted.payload.system) return;
           receiveMessage(chatId, decrypted.payload, {
             id: decrypted.id,
             at: new Date(decrypted.created_at).getTime() || Date.now(),
