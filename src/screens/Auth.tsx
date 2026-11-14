@@ -3,9 +3,9 @@ import { ArrowLeft, Camera, Check } from "lucide-react";
 import { useEffect, useRef, useState, type ClipboardEvent, type ChangeEvent } from "react";
 import { Avatar } from "../components/Avatar";
 import { ContactGlobe } from "../components/Globe";
+import { PhotoEditor } from "../components/PhotoEditor";
 import { Button, IconButton, Sheet } from "../components/ui";
 import { playTone } from "../lib/feedback";
-import { fileToAvatar } from "../lib/image";
 import { useStore } from "../lib/store";
 import { supabase } from "../lib/supabase";
 import { cn, haptic } from "../lib/utils";
@@ -348,6 +348,7 @@ function SignupStep({
   const [username, setUsername] = useState("");
   const [bio, setBio] = useState("");
   const [avatar, setAvatar] = useState<string | null>(null);
+  const [editorFile, setEditorFile] = useState<File | null>(null);
   const [touchedUsername, setTouchedUsername] = useState(false);
   const [loading, setLoading] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -366,15 +367,9 @@ function SignupStep({
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const result = await fileToAvatar(file);
-      setAvatar(result);
-      playTone("tap");
-    } catch {
-      /* ignore */
-    }
     event.target.value = "";
+    if (!file) return;
+    setEditorFile(file);
   };
 
   const valid = name.trim().length >= 2;
@@ -469,6 +464,19 @@ function SignupStep({
           Начать
         </Button>
       </div>
+
+      {editorFile ? (
+        <PhotoEditor
+          file={editorFile}
+          mode="avatar"
+          onCancel={() => setEditorFile(null)}
+          onDone={({ dataUrl }) => {
+            setAvatar(dataUrl);
+            setEditorFile(null);
+            playTone("tap");
+          }}
+        />
+      ) : null}
     </div>
   );
 }

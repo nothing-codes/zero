@@ -8,8 +8,8 @@ import {
 import { Avatar } from "../components/Avatar";
 import { ContactPicker } from "../components/ContactPicker";
 import { MapArt, PhotoArt } from "../components/media";
+import { PhotoEditor, type EditedImage } from "../components/PhotoEditor";
 import { Button, ContextMenu, IconButton, Sheet, SettingsRow } from "../components/ui";
-import { fileToPhoto } from "../lib/image";
 import {
   downloadFileBlob, pickZeroDirectory, saveImageToGallery, triggerBlobDownload, uploadFileToCloud, writeBlobToDirectory,
 } from "../lib/files";
@@ -644,6 +644,8 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   const [editText, setEditText] = useState("");
   const [savingEdit, setSavingEdit] = useState(false);
   const [transfers, setTransfers] = useState<Record<string, FileTransfer>>({});
+  const [photoFile, setPhotoFile] = useState<File | null>(null);
+  const [, setSeenTick] = useState(0);
 
   const [recording, setRecording] = useState<{ kind: "voice" | "videoNote"; startedAt: number } | null>(null);
   const [recElapsed, setRecElapsed] = useState(0);
@@ -915,6 +917,12 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   };
 
   useEffect(() => {
+    if (chat.online) return;
+    const timer = window.setInterval(() => setSeenTick((value) => value + 1), 30_000);
+    return () => window.clearInterval(timer);
+  }, [chat.online, chat.lastSeen]);
+
+  useEffect(() => {
     if (!editTarget) return;
     const frame = window.requestAnimationFrame(() => {
       const node = editTextRef.current;
@@ -957,16 +965,14 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     haptic(5);
   };
 
-  const handlePhoto = async (file: File) => {
+  const handlePhoto = async (edited: EditedImage) => {
     try {
-      const dataSrc = await fileToPhoto(file);
-      const image = await new Promise<HTMLImageElement>((resolve) => { const img = new Image(); img.onload = () => resolve(img); img.src = dataSrc; });
+      const image = await new Promise<HTMLImageElement>((resolve) => { const img = new Image(); img.onload = () => resolve(img); img.src = edited.dataUrl; });
       // Для настоящего чата фото шифруется и загружается в Storage.
-      let src = dataSrc;
+      let src = edited.dataUrl;
       let enc: MediaEncryption | undefined;
       try {
-        const blob = await (await fetch(dataSrc)).blob();
-        const uploaded = await uploadMedia(blob, "photo");
+        const uploaded = await uploadMedia(edited.blob, "photo");
         src = uploaded.url;
         enc = uploaded.enc;
       } catch { /* офлайн или нет бакета */ }
@@ -1518,8 +1524,8 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
           <SettingsRow icon={<FileIcon size={16} />} label="Файл" onClick={() => fileInput.current?.click()} className="border-0" />
           <SettingsRow icon={<BarChart3 size={16} />} label="Опрос" last onClick={() => { setAttachOpen(false); setTimeout(() => setPollOpen(true), 120); }} className="border-0" />
         </div>
-        <input ref={photoInput} type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void handlePhoto(f); e.target.value = ""; }} />
-        <input ref={cameraInput} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) void handlePhoto(f); e.target.value = ""; }} />
+        <input ref={photoInput} type="file" accept="image/*" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) setPhotoFile(f); e.target.value = ""; }} />
+        <input ref={cameraInput} type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) setPhotoFile(f); e.target.value = ""; }} />
         <input ref={fileInput} type="file" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ""; }} />
       </Sheet>
 
@@ -1560,7 +1566,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
 
       <Sheet open={profileOpen} onClose={() => setProfileOpen(false)} title="Профиль">
         <div className="flex flex-col items-center pb-3 text-center">
-          <Avatar name={chat.name} src={chat.avatar} size={96} online={chat.online} />
+          <Avatar name={chat.name} src={chat.avatar} size={96} />
           <p className="t-h mt-4 flex items-center justify-center gap-1.5">
             <span className="truncate">{chat.name}</span>
             {chat.verified ? <BadgeCheck size={18} className="shrink-0 text-foreground/60" strokeWidth={1.9} /> : null}
@@ -1650,6 +1656,18 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
           </motion.div>
         ) : null}
       </AnimatePresence>
+
+      {photoFile ? (
+        <PhotoEditor
+          file={photoFile}
+          mode="photo"
+          onCancel={() => setPhotoFile(null)}
+          onDone={(edited) => {
+            setPhotoFile(null);
+            void handlePhoto(edited);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

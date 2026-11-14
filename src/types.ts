@@ -27,6 +27,7 @@ export interface User {
   bio: string;
   status: string;
   avatar: string | null;
+  banner?: string | null;
   createdAt: number;
 }
 

@@ -2,41 +2,77 @@ import { motion } from "motion/react";
 import { ArrowLeft, CalendarDays, Camera, Check, ChevronRight, Lock, Mail, MessageCircle, Pencil, Share2 } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { Avatar } from "../components/Avatar";
+import { PhotoEditor, type PhotoEditorMode } from "../components/PhotoEditor";
 import { Button, IconButton, Sheet } from "../components/ui";
-import { fileToAvatar, shareText } from "../lib/image";
+import { shareText } from "../lib/image";
 import { useAuthedStore } from "../lib/store";
 import { appLink, cn, haptic } from "../lib/utils";
+
+const BANNERS = [
+  { id: "g1", style: "linear-gradient(135deg, #3a3a3c 0%, #141416 55%, #08080a 100%)" },
+  { id: "g2", style: "linear-gradient(135deg, #0a84ff 0%, #004a8f 55%, #071521 100%)" },
+  { id: "g3", style: "linear-gradient(135deg, #ff9f0a 0%, #ff375f 55%, #3a0714 100%)" },
+  { id: "g4", style: "linear-gradient(135deg, #bf5af2 0%, #5e2a8a 55%, #140a20 100%)" },
+  { id: "g5", style: "linear-gradient(135deg, #30d158 0%, #0d5a35 55%, #06130c 100%)" },
+  { id: "g6", style: "linear-gradient(135deg, #ff6482 0%, #8a1838 55%, #1a050b 100%)" },
+];
+
+function isBannerPhoto(value?: string | null) {
+  return Boolean(value && (value.startsWith("data:") || value.startsWith("http://") || value.startsWith("https://")));
+}
+
+function BannerVisual({ banner, className }: { banner?: string | null; className?: string }) {
+  if (isBannerPhoto(banner)) {
+    return <img src={banner ?? ""} alt="" draggable={false} className={cn("h-full w-full object-cover", className)} />;
+  }
+  const style = BANNERS.find((item) => item.id === banner)?.style ?? BANNERS[0].style;
+  return <div className={cn("h-full w-full", className)} style={{ backgroundImage: style }} />;
+}
 
 export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; onOpenSettings: () => void; }) {
   const { state, user, updateProfile } = useAuthedStore();
   const [editOpen, setEditOpen] = useState(false);
   const [shared, setShared] = useState(false);
+  const [editor, setEditor] = useState<{ file: File; mode: PhotoEditorMode } | null>(null);
   const [draft, setDraft] = useState({
     name: user.name,
     username: user.username,
     status: user.status,
     bio: user.bio,
     avatar: user.avatar,
+    banner: user.banner ?? null,
   });
   const fileRef = useRef<HTMLInputElement>(null);
+  const bannerRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!editOpen) return;
-    setDraft({ name: user.name, username: user.username, status: user.status, bio: user.bio, avatar: user.avatar });
+    setDraft({
+      name: user.name,
+      username: user.username,
+      status: user.status,
+      bio: user.bio,
+      avatar: user.avatar,
+      banner: user.banner ?? null,
+    });
   }, [editOpen, user]);
 
   const messages = state.chats.reduce((sum, chat) => sum + chat.messages.length, 0);
   const media = state.chats.reduce((sum, chat) => sum + chat.messages.filter((m) => ["photo", "voice", "videoNote", "file"].includes(m.kind)).length, 0);
   const since = new Date(user.createdAt).toLocaleDateString("ru-RU", { month: "long", year: "numeric" });
 
-  const pickAvatar = async (event: ChangeEvent<HTMLInputElement>) => {
+  const pickAvatar = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file) return;
-    try {
-      const result = await fileToAvatar(file);
-      setDraft((current) => ({ ...current, avatar: result }));
-    } catch { /* noop */ }
     event.target.value = "";
+    if (!file) return;
+    setEditor({ file, mode: "avatar" });
+  };
+
+  const pickBanner = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setEditor({ file, mode: "banner" });
   };
 
   return (
@@ -55,16 +91,23 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
       </header>
 
       <div className="no-scrollbar relative z-10 min-h-0 flex-1 overflow-y-auto px-5 pb-[40px]">
-        <div className="flex flex-col items-center pt-6 text-center">
-          <motion.div initial={{ scale: 0.92, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ type: "spring", stiffness: 260, damping: 24 }} className="relative">
-            {/* Убраны круговые свечения (border и dashed) */}
-            <Avatar name={user.name} src={user.avatar} size={118} gradient />
-            <span className="absolute -bottom-1 right-0 grid size-8 place-items-center rounded-full border-2 border-background bg-card text-foreground/70">
-              <Lock size={12} />
-            </span>
-          </motion.div>
+        <div className="relative -mx-5">
+          <div className="relative h-[178px] overflow-hidden rounded-b-[28px]">
+            <BannerVisual banner={user.banner} />
+            <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent" />
+          </div>
+          <div className="relative -mt-[63px] flex justify-center">
+            <motion.div initial={{ scale: 0.92, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={{ type: "spring", stiffness: 260, damping: 24 }} className="relative rounded-full bg-background p-1">
+              <Avatar name={user.name} src={user.avatar} size={118} gradient />
+              <span className="absolute -bottom-1 right-0 grid size-8 place-items-center rounded-full border-2 border-background bg-card text-foreground/70">
+                <Lock size={12} />
+              </span>
+            </motion.div>
+          </div>
+        </div>
 
-          <h1 className="t-title mt-5 flex items-center justify-center gap-1.5">
+        <div className="flex flex-col items-center text-center">
+          <h1 className="t-title mt-4 flex items-center justify-center gap-1.5">
             <span className="truncate">{user.name}</span>
           </h1>
           <p className="t-sub mt-1 text-faint">@{user.username}</p>
@@ -124,6 +167,43 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
       </div>
 
       <Sheet open={editOpen} onClose={() => setEditOpen(false)} title="Изменить профиль">
+        <div className="relative mb-5 h-[112px] overflow-hidden rounded-[16px]">
+          <BannerVisual banner={draft.banner} />
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/70 via-black/20 to-transparent" />
+        </div>
+
+        <div className="mb-5">
+          <p className="t-body font-medium">Баннер</p>
+          <div className="mt-2 flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
+            {BANNERS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                aria-label="Градиент"
+                onClick={() => setDraft((c) => ({ ...c, banner: item.id }))}
+                className={cn(
+                  "size-9 shrink-0 rounded-full border transition-transform",
+                  draft.banner === item.id ? "scale-110 border-foreground ring-2 ring-foreground/15" : "border-foreground/15",
+                )}
+                style={{ backgroundImage: item.style }}
+              />
+            ))}
+            <button
+              type="button"
+              onClick={() => bannerRef.current?.click()}
+              className={cn(
+                "press grid size-9 shrink-0 place-items-center rounded-full border",
+                isBannerPhoto(draft.banner)
+                  ? "border-foreground bg-foreground/10 text-foreground ring-2 ring-foreground/15"
+                  : "border-foreground/15 bg-foreground/6 text-foreground/65",
+              )}
+            >
+              <Camera size={15} />
+            </button>
+          </div>
+          <input ref={bannerRef} type="file" accept="image/*" onChange={pickBanner} className="hidden" />
+        </div>
+
         <div className="flex items-center gap-4 pb-5">
           <button type="button" onClick={() => fileRef.current?.click()} className="relative rounded-full">
             <Avatar name={draft.name || "Zero"} src={draft.avatar} size={76} gradient />
@@ -170,12 +250,30 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
               status: draft.status.trim() || "в сети",
               bio: draft.bio.trim(),
               avatar: draft.avatar,
+              banner: draft.banner,
             });
             haptic(8);
             setEditOpen(false);
           }}>Сохранить</Button>
         </div>
       </Sheet>
+
+      {editor ? (
+        <PhotoEditor
+          file={editor.file}
+          mode={editor.mode}
+          onCancel={() => setEditor(null)}
+          onDone={({ dataUrl }) => {
+            setDraft((current) =>
+              editor.mode === "banner"
+                ? { ...current, banner: dataUrl }
+                : { ...current, avatar: dataUrl },
+            );
+            setEditor(null);
+            haptic(6);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

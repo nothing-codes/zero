@@ -48,6 +48,15 @@ const MONTHS = [
 ];
 
 const WEEKDAYS = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
+const WEEKDAYS_FULL = [
+  "воскресенье",
+  "понедельник",
+  "вторник",
+  "среду",
+  "четверг",
+  "пятницу",
+  "субботу",
+];
 
 export function pad2(n: number) {
   return n < 10 ? `0${n}` : String(n);
@@ -99,16 +108,21 @@ export function duration(sec: number) {
 export function lastSeenLabel(at?: number, online?: boolean) {
   if (online) return "в сети";
   if (!at) return "был(а) недавно";
-  const diff = Date.now() - at;
+  const now = Date.now();
+  const diff = Math.max(0, now - at);
   const mins = Math.floor(diff / 60_000);
-  if (mins < 2) return "был(а) только что";
-  if (mins < 60) return `был(а) ${mins} ${plural(mins, "минуту", "минуты", "минут")} назад`;
+  if (mins < 1) return "был(а) в сети только что";
+  if (mins < 60) return `был(а) в сети ${mins} ${plural(mins, "минуту", "минуты", "минут")} назад`;
   const hours = Math.floor(mins / 60);
-  if (hours < 24) return `был(а) ${hours} ${plural(hours, "час", "часа", "часов")} назад`;
-  const days = Math.floor(hours / 24);
-  if (days === 1) return "был(а) вчера";
-  if (days < 7) return `был(а) ${days} ${plural(days, "день", "дня", "дней")} назад`;
-  return "был(а) давно";
+  if (isSameDay(now, at)) return `был(а) в сети ${hours} ${plural(hours, "час", "часа", "часов")} назад`;
+  const diffDays = Math.round((dayStart(now) - dayStart(at)) / 86_400_000);
+  if (diffDays === 1) return `был(а) вчера в ${timeOf(at)}`;
+  if (diffDays < 7) return `был(а) в ${WEEKDAYS_FULL[new Date(at).getDay()]} в ${timeOf(at)}`;
+  const d = new Date(at);
+  if (d.getFullYear() === new Date(now).getFullYear()) {
+    return `был(а) ${d.getDate()} ${MONTHS[d.getMonth()]} в ${timeOf(at)}`;
+  }
+  return `был(а) ${pad2(d.getDate())}.${pad2(d.getMonth() + 1)}.${d.getFullYear()}`;
 }
 
 export function plural(n: number, one: string, few: string, many: string) {
