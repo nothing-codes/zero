@@ -2,6 +2,7 @@ import { Check, Loader2, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { searchProfiles, type ZeroProfile } from "../lib/chat";
 import type { Contact } from "../lib/data";
+import { isZeroIdentity } from "../lib/identity";
 import { useAuthedStore } from "../lib/store";
 import { haptic } from "../lib/utils";
 import { Avatar } from "./Avatar";
@@ -55,7 +56,7 @@ export function ContactPicker({
       void searchProfiles(query, user.email)
         .then((rows) => {
           if (cancelled) return;
-          setResults(rows);
+          setResults(rows.filter((row) => !isZeroIdentity({ username: row.username, email: row.email })));
           setFailed(false);
         })
         .catch(() => {
@@ -88,7 +89,7 @@ export function ContactPicker({
     }
     // Без поиска показываем людей, с которыми уже есть настоящий чат.
     return state.chats
-      .filter((chat) => !chat.group && chat.id !== "c_zero" && Boolean(chat.email))
+      .filter((chat) => !chat.group && chat.id !== "c_zero" && Boolean(chat.email) && !isZeroIdentity(chat))
       .map((chat) => ({
         id: chat.id,
         name: chat.name,

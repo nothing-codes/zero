@@ -60,21 +60,32 @@ export interface Poll {
   options: PollOption[];
 }
 
+export interface MediaEncryption {
+  /** Сырой AES-ключ в base64 — хранится только внутри зашифрованного payload. */
+  key: string;
+  iv: string;
+  mime: string;
+  size: number;
+}
+
 export interface MessageVoice {
   duration: number;
   waveform: number[];
   src?: string;
+  enc?: MediaEncryption;
 }
 
 export interface MessageVideoNote {
   duration: number;
   seed: number;
   src?: string;
+  enc?: MediaEncryption;
 }
 
 export interface MessagePhoto {
   seed?: number;
   src?: string;
+  enc?: MediaEncryption;
   wide?: boolean;
   caption?: string;
 }
@@ -85,6 +96,7 @@ export interface MessageFile {
   ext: string;
   mime?: string;
   src?: string;
+  enc?: MediaEncryption;
   pending?: boolean;
 }
 

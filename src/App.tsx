@@ -4,6 +4,7 @@ import { WifiOff } from "lucide-react";
 import { CallOverlay } from "./components/CallOverlay";
 import { Dock, type Tab } from "./components/Dock";
 import { callRoom, slug, subscribeCall, type IncomingCall } from "./lib/rtc";
+import { isZeroIdentity } from "./lib/identity";
 import { supabase } from "./lib/supabase";
 import { useStore } from "./lib/store";
 import { cn, haptic } from "./lib/utils";
@@ -83,6 +84,8 @@ export function App() {
 
   const openCall = useCallback(
     (chatId: string) => {
+      const chat = chatsRef.current.find((item) => item.id === chatId);
+      if (chat && isZeroIdentity(chat)) return;
       pushUiEntry();
       setCall({ chatId });
     },
@@ -159,7 +162,7 @@ export function App() {
       subscribeCall(room, (signal) => {
         if (signal.kind !== "offer" || callRef.current) return;
         const handle = slug(signal.handle || signal.from);
-        if (!handle) return;
+        if (!handle || isZeroIdentity({ username: handle })) return;
         const existing = chatsRef.current.find(
           (chat) => slug(chat.username ?? "") === handle || slug(chat.name) === handle,
         );

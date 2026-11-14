@@ -1,4 +1,5 @@
 import type { AppState } from "../types";
+import { decryptState, encryptState, isEncryptedState } from "./e2ee";
 import { supabase } from "./supabase";
 
 /**
@@ -36,9 +37,10 @@ export async function saveCloudState(email: string, state: AppState): Promise<vo
     settings: state.settings,
   };
 
+  const encrypted = await encryptState(payload, key);
   const { error } = await supabase
     .from(CLOUD_TABLE)
-    .upsert({ phone: key, state: payload, updated_at: new Date().toISOString() }, { onConflict: "phone" });
+    .upsert({ phone: key, state: encrypted, updated_at: new Date().toISOString() }, { onConflict: "phone" });
 
   if (error) throw error;
 }
@@ -51,8 +53,23 @@ export async function loadCloudState(email: string): Promise<CloudSnapshot | nul
     .from(CLOUD_TABLE)
     .select("state, updated_at")
     .eq("phone", key)
-    .maybeSingle<{ state: CloudState; updated_at: string }>();
+    .maybeSingle<{ state: unknown; updated_at: string }>();
 
   if (error || !data?.state) return null;
-  return { ...data.state, updated_at: data.updated_at };
+
+  if (isEncryptedState(data.state)) {
+    try {
+      const decrypted = await decryptState<CloudState>(data.state, key);
+      return decrypted ? { ...decrypted, updated_at: data.updated_at } : null;
+    } catch {
+      // Ключ этого устройства не подходит — облачная копия недоступна.
+      return null;
+    }
+  }
+
+  // Старые незашифрованные копии: читаем один раз, при следующем сохранении
+  // они перезапишутся зашифрованными.
+  const legacy = data.state as CloudState;
+  if (!legacy || typeof legacy !== "object") return null;
+  return { ...legacy, updated_at: data.updated_at };
 }

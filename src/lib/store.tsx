@@ -16,6 +16,7 @@ import type {
   MessageKind,
   MessagePayload,
   MessageStatus,
+  MediaEncryption,
   Settings,
   ToastData,
   User,
@@ -24,7 +25,9 @@ import { createInitialState, DEFAULT_SETTINGS, STATE_VERSION } from "./data";
 import { loadCloudState, saveCloudState } from "./cloud";
 import { supabase } from "./supabase";
 import {
+  blockRemoteUser,
   deleteRemoteMessage,
+  decryptRemoteRow,
   editRemoteMessage,
   loadConversation,
   loadRecentIncoming,
@@ -37,6 +40,8 @@ import {
   type RemoteMessageRow,
 } from "./chat";
 import { deleteStoragePaths, storagePathFromUrl } from "./files";
+import { isZeroIdentity } from "./identity";
+import { migrateLegacyContent } from "./migrate";
 import { haptic, stripEmoji, uid } from "./utils";
 import {
   playTone,
@@ -226,7 +231,7 @@ interface StoreValue {
   updateProfile: (patch: Partial<User>) => void;
   updateSettings: (patch: Partial<Settings>) => void;
   sendMessage: (chatId: string, data: SendPayload) => string | undefined;
-  setMessageMediaSource: (chatId: string, messageId: string, kind: "voice" | "videoNote" | "file", src: string) => void;
+  setMessageMediaSource: (chatId: string, messageId: string, kind: "voice" | "videoNote" | "file", src: string, enc?: MediaEncryption) => void;
   receiveMessage: (
     chatId: string,
     data: SendPayload,
@@ -259,6 +264,7 @@ interface StoreValue {
   }) => string;
   addCall: (call: Omit<CallRecord, "id" | "at">) => void;
   clearMessages: (chatId: string) => void;
+  blockChat: (chatId: string) => Promise<boolean>;
 }
 
 const StoreContext = createContext<StoreValue | null>(null);
@@ -338,6 +344,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!state.user?.email) return;
     void upsertProfile(state.user).catch(() => undefined);
+    migrateLegacyContent(state.user.email);
   }, [state.user]);
 
   // Theme + motion preferences
@@ -593,7 +600,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   );
 
   const setMessageMediaSource = useCallback(
-    (chatId: string, messageId: string, kind: "voice" | "videoNote" | "file", src: string) => {
+    (chatId: string, messageId: string, kind: "voice" | "videoNote" | "file", src: string, enc?: MediaEncryption) => {
       commit((prev) => ({
         ...prev,
         chats: prev.chats.map((chat) => {
@@ -603,13 +610,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             messages: chat.messages.map((message) => {
               if (message.id !== messageId) return message;
               if (kind === "voice" && message.voice) {
-                return { ...message, voice: { ...message.voice, src } };
+                return { ...message, voice: { ...message.voice, src, enc } };
               }
               if (kind === "videoNote" && message.videoNote) {
-                return { ...message, videoNote: { ...message.videoNote, src } };
+                return { ...message, videoNote: { ...message.videoNote, src, enc } };
               }
               if (kind === "file" && message.file) {
-                return { ...message, file: { ...message.file, src, pending: false } };
+                return { ...message, file: { ...message.file, src, enc, pending: false } };
               }
               return message;
             }),
@@ -785,13 +792,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }
 
       const payload: MessagePayload = { ...payloadOf(message), text: value, edited: true };
-      if (chat.remote) {
+      if (chat.remote && chat.email) {
         const meEmail = current.user?.email ?? "";
         try {
           await editRemoteMessage({
             id: message.remoteId,
             clientId: message.id,
             senderEmail: meEmail,
+            peerEmail: chat.email,
             payload,
           });
         } catch {
@@ -878,6 +886,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return true;
     },
     [commit],
+  );
+
+  const blockChat = useCallback(
+    async (chatId: string) => {
+      const current = stateRef.current;
+      const chat = current.chats.find((item) => item.id === chatId);
+      const blocker = current.user?.email ?? "";
+      if (!chat || !blocker) return false;
+      if (isZeroIdentity(chat)) return false;
+      try {
+        await blockRemoteUser({
+          blockerEmail: blocker,
+          blockedEmail: chat.email ?? null,
+          blockedUsername: chat.username ?? null,
+        });
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [],
   );
 
   const pinMessage = useCallback(
@@ -1081,23 +1110,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const channel = subscribeToIncoming(
       email,
       (row) => {
-        const senderEmail = normalizeEmail(row.sender_email);
-        if (senderEmail === email) return;
-        const senderUsername = normalizeUsername(row.sender_username);
-        // openOrCreateChat сам найдёт существующий чат по email/@username и
-        // при необходимости сделает его настоящим (email + remote).
-        const chatId = openOrCreateChat({
-          name: row.sender_name || row.sender_username || senderEmail,
-          username: senderUsername,
-          email: senderEmail,
-          avatar: row.sender_avatar,
-          online: true,
-          remote: true,
-        });
-        receiveMessage(chatId, row.payload, {
-          id: row.id,
-          at: new Date(row.created_at).getTime() || Date.now(),
-        });
+        void decryptRemoteRow(row, email).then((decrypted) => {
+          const senderEmail = normalizeEmail(decrypted.sender_email);
+          if (senderEmail === email) return;
+          const senderUsername = normalizeUsername(decrypted.sender_username);
+          // openOrCreateChat сам найдёт существующий чат по email/@username и
+          // при необходимости сделает его настоящим (email + remote).
+          const chatId = openOrCreateChat({
+            name: decrypted.sender_name || decrypted.sender_username || senderEmail,
+            username: senderUsername,
+            email: senderEmail,
+            avatar: decrypted.sender_avatar,
+            online: true,
+            remote: true,
+          });
+          receiveMessage(chatId, decrypted.payload, {
+            id: decrypted.id,
+            at: new Date(decrypted.created_at).getTime() || Date.now(),
+          });
+        }).catch(() => undefined);
       },
       (row) => {
         if (!row.read_at) return;
@@ -1120,30 +1151,32 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       (row) => {
         const peerEmail = normalizeEmail(row.sender_email);
         if (peerEmail === email) return;
-        commit((prev) => ({
-          ...prev,
-          chats: prev.chats.map((chat) => {
-            if (!chat.email || normalizeEmail(chat.email) !== peerEmail) return chat;
-            let changed = false;
-            const messages = chat.messages.map((message) => {
-              if (message.remoteId !== row.id && message.id !== row.client_id) return message;
-              changed = true;
-              return {
-                ...message,
-                ...row.payload,
-                id: message.id,
-                chatId: message.chatId,
-                fromMe: message.fromMe,
-                at: message.at,
-                fresh: message.fresh,
-                status: message.status,
-                sender: message.sender,
-                remoteId: message.remoteId ?? row.id,
-              };
-            });
-            return changed ? { ...chat, messages } : chat;
-          }),
-        }));
+        void decryptRemoteRow(row, email).then((decrypted) => {
+          commit((prev) => ({
+            ...prev,
+            chats: prev.chats.map((chat) => {
+              if (!chat.email || normalizeEmail(chat.email) !== peerEmail) return chat;
+              let changed = false;
+              const messages = chat.messages.map((message) => {
+                if (message.remoteId !== decrypted.id && message.id !== decrypted.client_id) return message;
+                changed = true;
+                return {
+                  ...message,
+                  ...decrypted.payload,
+                  id: message.id,
+                  chatId: message.chatId,
+                  fromMe: message.fromMe,
+                  at: message.at,
+                  fresh: message.fresh,
+                  status: message.status,
+                  sender: message.sender,
+                  remoteId: message.remoteId ?? decrypted.id,
+                };
+              });
+              return changed ? { ...chat, messages } : chat;
+            }),
+          }));
+        }).catch(() => undefined);
       },
       (row) => {
         const rowId = row.id;
@@ -1422,6 +1455,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       openOrCreateChat,
       addCall,
       clearMessages,
+      blockChat,
     };
   }, [
     state,
@@ -1455,6 +1489,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     openOrCreateChat,
     addCall,
     clearMessages,
+    blockChat,
   ]);
 
   return <StoreContext.Provider value={value}>{children}</StoreContext.Provider>;

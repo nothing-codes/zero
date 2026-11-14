@@ -13,9 +13,12 @@ import { fileToPhoto } from "../lib/image";
 import {
   downloadFileBlob, pickZeroDirectory, saveImageToGallery, triggerBlobDownload, uploadFileToCloud, writeBlobToDirectory,
 } from "../lib/files";
+import { decryptBlob } from "../lib/e2ee";
+import { isZeroIdentity } from "../lib/identity";
+import { useMediaSrc } from "../lib/useMediaSrc";
 import { pickRecorderMime, uploadMedia } from "../lib/media";
 import { useAuthedStore } from "../lib/store";
-import type { Chat, Message, MessageStatus, PollOption } from "../types";
+import type { Chat, MediaEncryption, Message, MessageStatus, PollOption } from "../types";
 import { cn, duration as fmtDuration, haptic, lastSeenLabel, makeWave, plural, timeOf, uid } from "../lib/utils";
 
 function searchText(message: Message) {
@@ -78,7 +81,8 @@ function Meta({ message, mine }: { message: Message; mine: boolean }) {
 
 function VoiceBubble({ message, mine }: { message: Message; mine: boolean }) {
   const voice = message.voice!;
-  const hasSrc = Boolean(voice.src);
+  const mediaSrc = useMediaSrc(voice.src, voice.enc);
+  const hasSrc = Boolean(mediaSrc);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [elapsed, setElapsed] = useState(0);
@@ -157,7 +161,7 @@ function VoiceBubble({ message, mine }: { message: Message; mine: boolean }) {
       {hasSrc ? (
         <audio
           ref={audioRef}
-          src={voice.src}
+          src={mediaSrc}
           preload="auto"
           playsInline
           hidden
@@ -184,7 +188,8 @@ const NOTE_SIZE = 194;
 
 function VideoNoteBubble({ message, mine }: { message: Message; mine: boolean }) {
   const note = message.videoNote!;
-  const hasSrc = Boolean(note.src);
+  const mediaSrc = useMediaSrc(note.src, note.enc);
+  const hasSrc = Boolean(mediaSrc);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [failed, setFailed] = useState(false);
@@ -236,7 +241,7 @@ function VideoNoteBubble({ message, mine }: { message: Message; mine: boolean })
         {hasSrc ? (
           <video
             ref={videoRef}
-            src={note.src}
+            src={mediaSrc}
             playsInline
             preload="auto"
             className="size-full object-cover"
@@ -372,6 +377,7 @@ function MessageBubble({
   message: Message; chat: Chat; prev?: Message; next?: Message; replyMessage?: Message; activeMatch: boolean; flash: boolean; onMenu: (m: Message, x: number, y: number) => void; onScrollTo: (id: string) => void; searchDimmed: boolean; onVote: (id: string) => void; onMediaLoad: () => void; transfer?: FileTransfer; onFileDownload: (m: Message) => void; onFileCancel: (m: Message) => void; onReply: (m: Message) => void;
 }) {
   const mine = message.fromMe;
+  const photoSrc = useMediaSrc(message.photo?.src, message.photo?.enc);
   const isGroup = Boolean(chat.group);
   const timeGap = (a?: Message, b?: Message) => (a && b ? Math.abs(a.at - b.at) < 5 * 60_000 : false);
   const sameAsPrev = Boolean(prev && prev.fromMe === message.fromMe && prev.sender === message.sender && timeGap(prev, message));
@@ -472,7 +478,7 @@ function MessageBubble({
     );
     if (message.kind === "photo") return (
       <div className={cn("max-w-[286px] overflow-hidden p-1.5", bubbleRadius, bubbleTone)}>
-        <div className="block w-full overflow-hidden rounded-[14px]">{message.photo?.src ? <img src={message.photo.src} alt="" draggable={false} onLoad={onMediaLoad} className="max-h-[340px] w-full object-cover" /> : <PhotoArt seed={message.photo?.seed ?? 1} wide={message.photo?.wide} className="aspect-[4/5] w-full" />}</div>
+        <div className="block w-full overflow-hidden rounded-[14px]">{photoSrc ? <img src={photoSrc} alt="" draggable={false} onLoad={onMediaLoad} className="max-h-[340px] w-full object-cover" /> : <PhotoArt seed={message.photo?.seed ?? 1} wide={message.photo?.wide} className="aspect-[4/5] w-full" />}</div>
         {message.photo?.caption ? <p className="bubble-text px-1.5 pb-0.5 pt-2 text-[14px] leading-snug">{message.photo.caption}</p> : null}
         <div className="px-1.5"><Meta message={message} mine={mine} /></div>
       </div>
@@ -609,7 +615,8 @@ function RecordingOverlay({ kind, elapsed, cancelled, videoRef, hasStream, level
 }
 
 function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; onCall: () => void; }) {
-  const { sendMessage, setMessageMediaSource, deleteMessage, editMessage, pinMessage, votePoll, forwardMessage, setDraft, markRead, setActiveChat, openOrCreateChat, clearMessages, loadChatHistory } = useAuthedStore();
+  const { sendMessage, setMessageMediaSource, deleteMessage, editMessage, pinMessage, votePoll, forwardMessage, setDraft, markRead, setActiveChat, openOrCreateChat, clearMessages, loadChatHistory, blockChat } = useAuthedStore();
+  const isZero = isZeroIdentity(chat);
   const messages = chat.messages;
   const [text, setText] = useState(chat.draft ?? "");
   const [unreadFromId] = useState<string | null>(() => unreadStartId(chat.messages, chat.unread));
@@ -863,12 +870,13 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     const controller = new AbortController();
     updateTransfer(message.id, { mode: "download", progress: 0, controller });
     try {
-      const blob = await downloadFileBlob(
+      const downloaded = await downloadFileBlob(
         file.src,
         file.size,
         (progress) => updateTransferProgress(message.id, progress),
         controller.signal,
       );
+      const blob = file.enc ? await decryptBlob(downloaded, file.enc) : downloaded;
       const directory = zeroDirRef.current;
       if (directory) {
         try {
@@ -894,7 +902,8 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     try {
       const response = await fetch(src, { cache: "no-store" });
       if (!response.ok) throw new Error("photo");
-      const blob = await response.blob();
+      const cipher = await response.blob();
+      const blob = message.photo?.enc ? await decryptBlob(cipher, message.photo.enc) : cipher;
       const type = blob.type || "image/jpeg";
       const ext = type.includes("png") ? "png" : type.includes("webp") ? "webp" : type.includes("gif") ? "gif" : "jpg";
       const outcome = await saveImageToGallery(blob, `zero-${Date.now()}.${ext}`);
@@ -952,14 +961,16 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     try {
       const dataSrc = await fileToPhoto(file);
       const image = await new Promise<HTMLImageElement>((resolve) => { const img = new Image(); img.onload = () => resolve(img); img.src = dataSrc; });
-      // Для настоящего чата фото должно быть доступно собеседнику, поэтому
-      // загружаем его в Storage. Если бакета нет — остаётся data URL.
+      // Для настоящего чата фото шифруется и загружается в Storage.
       let src = dataSrc;
+      let enc: MediaEncryption | undefined;
       try {
         const blob = await (await fetch(dataSrc)).blob();
-        src = await uploadMedia(blob, "photo");
+        const uploaded = await uploadMedia(blob, "photo");
+        src = uploaded.url;
+        enc = uploaded.enc;
       } catch { /* офлайн или нет бакета */ }
-      sendMessage(chat.id, { kind: "photo", photo: { seed: Math.floor(Math.random() * 900) + 1, src, wide: image.width > image.height * 1.2, caption: "" }, replyTo: replyTo?.id });
+      sendMessage(chat.id, { kind: "photo", photo: { seed: Math.floor(Math.random() * 900) + 1, src, enc, wide: image.width > image.height * 1.2, caption: "" }, replyTo: replyTo?.id });
       setReplyTo(null); setAttachOpen(false); notify("Фотография отправлена");
     } catch { notify("Не удалось открыть изображение"); }
   };
@@ -983,7 +994,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
         (progress) => updateTransferProgress(messageId, progress),
         controller.signal,
       );
-      setMessageMediaSource(chat.id, messageId, "file", uploaded.url);
+      setMessageMediaSource(chat.id, messageId, "file", uploaded.url, uploaded.enc);
       notify("Файл отправлен");
     } catch {
       if (controller.signal.aborted) notify("Загрузка отменена");
@@ -1090,7 +1101,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
 
       if (!messageId) return;
       void uploadMedia(blob, session.kind)
-        .then((url) => setMessageMediaSource(chat.id, messageId, session.kind, url))
+        .then((uploaded) => setMessageMediaSource(chat.id, messageId, session.kind, uploaded.url, uploaded.enc))
         .catch(() => notify("Не удалось загрузить медиа — собеседник его не получит"));
     };
 
@@ -1350,7 +1361,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
             </span>
           </button>
           <IconButton label="Поиск" onClick={() => setSearchOpen(true)} className="size-8"><Search size={17} /></IconButton>
-          <IconButton label="Аудиозвонок" onClick={() => onCall()} className="size-8"><Phone size={17} /></IconButton>
+          {isZero ? null : <IconButton label="Аудиозвонок" onClick={() => onCall()} className="size-8"><Phone size={17} /></IconButton>}
           <IconButton label="Ещё" onClick={() => setMenuOpen(true)} className="size-8"><MoreVertical size={17} /></IconButton>
         </div>
 
@@ -1521,7 +1532,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
           { icon: <Reply size={15} />, label: "Ответить", onClick: () => { const message = sheetMessage; setReplyTo(message); window.setTimeout(() => textRef.current?.focus(), 80); } },
           ...(sheetMessage.fromMe && sheetMessage.kind === "text" && sheetMessage.text ? [{ icon: <Pencil size={15} />, label: "Изменить", onClick: () => startEditMessage(sheetMessage) }] : []),
           ...(sheetMessage.kind === "file" && sheetMessage.file?.src ? [{ icon: <Download size={15} />, label: "Сохранить файл", onClick: () => { void downloadMessageFile(sheetMessage); } }] : []),
-          ...(sheetMessage.kind === "photo" && sheetMessage.photo?.src ? [{ icon: <Download size={15} />, label: "Сохранить фото в галерею", onClick: () => { void savePhotoMessage(sheetMessage); } }] : []),
+          ...(sheetMessage.kind === "photo" && sheetMessage.photo?.src ? [{ icon: <Download size={15} />, label: "Сохранить фото", onClick: () => { void savePhotoMessage(sheetMessage); } }] : []),
           { icon: <Pin size={15} />, label: sheetMessage.pinned ? "Открепить" : "Закрепить", onClick: () => pinMessage(chat.id, sheetMessage.id) },
           { icon: <Copy size={15} />, label: "Копировать", onClick: () => { void copyMessage(sheetMessage); } },
           { icon: <Forward size={15} />, label: "Переслать", onClick: () => setForwardMessageTarget(sheetMessage) },
@@ -1586,7 +1597,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
         </div>
 
         <div className="mt-4 flex gap-2 pb-2">
-          <Button variant="secondary" className="flex flex-1 items-center justify-center gap-2" onClick={() => { setProfileOpen(false); onCall(); }}><Phone size={15} /> Звонок</Button>
+          {isZero ? null : <Button variant="secondary" className="flex flex-1 items-center justify-center gap-2" onClick={() => { setProfileOpen(false); onCall(); }}><Phone size={15} /> Звонок</Button>}
           <Button className="flex flex-1 items-center justify-center gap-2" onClick={() => { setProfileOpen(false); window.setTimeout(() => textRef.current?.focus(), 180); }}>Написать</Button>
         </div>
       </Sheet>
@@ -1595,7 +1606,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
         <div className="pb-2">
           <SettingsRow icon={<Search size={15} />} label="Поиск по чату" onClick={() => { setMenuOpen(false); setSearchOpen(true); }} />
           <SettingsRow icon={<Eraser size={15} />} label="Очистить историю" onClick={() => { setMenuOpen(false); setConfirmClear(true); }} />
-          <SettingsRow icon={<Ban size={15} />} label="Заблокировать" danger last onClick={() => { setMenuOpen(false); notify(`${chat.name} заблокирован(а)`); }} />
+          {isZero ? null : <SettingsRow icon={<Ban size={15} />} label="Заблокировать" danger last onClick={() => { setMenuOpen(false); void blockChat(chat.id).then((ok) => notify(ok ? `${chat.name} заблокирован(а)` : "Не удалось заблокировать")); }} />}
         </div>
       </Sheet>
 

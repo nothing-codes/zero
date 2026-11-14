@@ -61,7 +61,9 @@ export function subscribeCall(
   onSignal: (signal: CallSignal) => void,
   onReady?: () => void,
 ) {
-  const channel = supabase.channel(room, { config: { broadcast: { self: false } } });
+  const channel = supabase.channel(room, {
+    config: { private: true, broadcast: { self: false } },
+  });
   channel.on("broadcast", { event: "signal" }, ({ payload }) => {
     if (payload && typeof payload === "object") onSignal(payload as CallSignal);
   });

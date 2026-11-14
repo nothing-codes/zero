@@ -2,6 +2,7 @@ import { motion } from "motion/react";
 import { Phone, PhoneIncoming, PhoneMissed, PhoneOutgoing, Plus } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Button, Sheet } from "../components/ui";
+import { isZeroIdentity } from "../lib/identity";
 import { useAuthedStore } from "../lib/store";
 import { cn, duration, haptic, listTime } from "../lib/utils";
 
@@ -22,6 +23,8 @@ export function CallsScreen({ onCall }: { onCall: (chatId: string) => void }) {
   );
 
   const startCall = (chatId: string | undefined, name: string) => {
+    const target = chatId ? state.chats.find((chat) => chat.id === chatId) : undefined;
+    if (target && isZeroIdentity(target)) return;
     haptic(6);
     const id =
       chatId && state.chats.some((chat) => chat.id === chatId)
@@ -32,7 +35,7 @@ export function CallsScreen({ onCall }: { onCall: (chatId: string) => void }) {
 
   const dial = () => {
     const username = handle.trim().replace(/^@+/, "").toLowerCase().replace(/[^a-z0-9_]/g, "");
-    if (!username) return;
+    if (!username || isZeroIdentity({ username })) return;
     const existing = state.chats.find((chat) => (chat.username ?? "").toLowerCase() === username);
     const id = existing?.id ?? openOrCreateChat({ name: `@${username}`, username, online: true });
     setDialOpen(false);

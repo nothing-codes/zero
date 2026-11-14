@@ -1,4 +1,5 @@
 import type { MessagePayload, User } from "../types";
+import { decryptPayload, encryptPayload, publicKeyFor } from "./e2ee";
 import { supabase } from "./supabase";
 
 /**
@@ -55,6 +56,7 @@ export async function upsertProfile(user: User): Promise<void> {
   if (!email) return;
   const username = normalizeUsername(user.username);
   if (!username) return;
+  const publicKey = await publicKeyFor(email);
 
   const { error } = await supabase.from(PROFILE_TABLE).upsert(
     {
@@ -64,6 +66,7 @@ export async function upsertProfile(user: User): Promise<void> {
       avatar: user.avatar ?? null,
       bio: user.bio ?? "",
       status: user.status ?? "",
+      public_key: publicKey,
       updated_at: new Date().toISOString(),
     },
     { onConflict: "email" },
@@ -116,7 +119,8 @@ export async function loadConversation(
     .limit(500);
 
   if (error) throw error;
-  return ((data ?? []) as RemoteMessageRow[]).reverse();
+  const rows = ((data ?? []) as RemoteMessageRow[]).reverse();
+  return Promise.all(rows.map((row) => decryptRemoteRow(row, meEmail)));
 }
 
 /**
@@ -140,7 +144,20 @@ export async function loadRecentIncoming(
     .limit(limit);
 
   if (error) throw error;
-  return (data ?? []) as RemoteMessageRow[];
+  const rows = (data ?? []) as RemoteMessageRow[];
+  return Promise.all(rows.map((row) => decryptRemoteRow(row, email)));
+}
+
+/** Расшифровывает одно сообщение, пришедшее через Realtime. */
+export async function decryptRemoteRow(
+  row: RemoteMessageRow,
+  meEmail: string,
+): Promise<RemoteMessageRow> {
+  const me = normalizeEmail(meEmail);
+  const sender = normalizeEmail(row.sender_email);
+  const peer = sender === me ? row.recipient_email : row.sender_email;
+  const payload = await decryptPayload(me, peer, row.payload);
+  return { ...row, payload };
 }
 
 export async function sendRemoteMessage(input: {
@@ -156,6 +173,8 @@ export async function sendRemoteMessage(input: {
   const toEmail = normalizeEmail(input.toEmail);
   if (!fromEmail || !toEmail) throw new Error("missing-email");
 
+  const payload = await encryptPayload(fromEmail, toEmail, input.payload);
+
   const { data, error } = await supabase
     .from(MESSAGE_TABLE)
     .insert({
@@ -166,7 +185,7 @@ export async function sendRemoteMessage(input: {
       sender_name: input.from.name,
       sender_username: normalizeUsername(input.from.username),
       sender_avatar: input.from.avatar ?? null,
-      payload: input.payload,
+      payload: payload as unknown as MessagePayload,
       created_at: new Date(input.at).toISOString(),
     })
     .select("id")
@@ -200,14 +219,16 @@ export async function editRemoteMessage(input: {
   id?: string;
   clientId: string;
   senderEmail: string;
+  peerEmail: string;
   payload: MessagePayload;
 }): Promise<void> {
   const email = normalizeEmail(input.senderEmail);
   if (!email) throw new Error("missing-email");
+  const payload = await encryptPayload(email, input.peerEmail, input.payload);
 
   let query = supabase
     .from(MESSAGE_TABLE)
-    .update({ payload: input.payload })
+    .update({ payload: payload as unknown as MessagePayload })
     .eq("sender_email", email);
 
   query = input.id ? query.eq("id", input.id) : query.eq("client_id", input.clientId);
@@ -232,6 +253,22 @@ export async function deleteRemoteMessage(input: {
   }
 
   const { error } = await query;
+  if (error) throw error;
+}
+
+/** Сохраняет блокировку пользователя. Сервер сам отклонит @zero. */
+export async function blockRemoteUser(input: {
+  blockerEmail: string;
+  blockedEmail?: string | null;
+  blockedUsername?: string | null;
+}): Promise<void> {
+  const blocker = normalizeEmail(input.blockerEmail);
+  if (!blocker) throw new Error("missing-email");
+  const { error } = await supabase.from("zero_blocks").insert({
+    blocker_email: blocker,
+    blocked_email: input.blockedEmail ? normalizeEmail(input.blockedEmail) : null,
+    blocked_username: input.blockedUsername ? normalizeUsername(input.blockedUsername) : null,
+  });
   if (error) throw error;
 }
 

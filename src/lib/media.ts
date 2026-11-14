@@ -1,3 +1,5 @@
+import type { MediaEncryption } from "../types";
+import { encryptBlob } from "./e2ee";
 import { supabase } from "./supabase";
 
 /**
@@ -32,13 +34,16 @@ export function pickRecorderMime(kind: "voice" | "videoNote"): string | undefine
   return candidates.find((type) => MediaRecorder.isTypeSupported(type));
 }
 
-export async function uploadMedia(blob: Blob, kind: "voice" | "videoNote" | "photo"): Promise<string> {
+export async function uploadMedia(
+  blob: Blob,
+  kind: "voice" | "videoNote" | "photo",
+): Promise<{ url: string; enc: MediaEncryption }> {
   const ext = extensionFor(blob, kind);
-  const path = `${kind}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext}`;
-  const contentType = (blob.type || "").split(";")[0] || (kind === "photo" ? "image/jpeg" : kind === "voice" ? "audio/webm" : "video/webm");
+  const path = `enc/${kind}/${Date.now()}-${Math.random().toString(36).slice(2, 10)}-${ext}.bin`;
+  const encrypted = await encryptBlob(blob);
 
-  const { error } = await supabase.storage.from(MEDIA_BUCKET).upload(path, blob, {
-    contentType,
+  const { error } = await supabase.storage.from(MEDIA_BUCKET).upload(path, encrypted.blob, {
+    contentType: "application/octet-stream",
     cacheControl: "31536000",
     upsert: false,
   });
@@ -46,5 +51,5 @@ export async function uploadMedia(blob: Blob, kind: "voice" | "videoNote" | "pho
   if (error) throw error;
 
   const { data } = supabase.storage.from(MEDIA_BUCKET).getPublicUrl(path);
-  return data.publicUrl;
+  return { url: data.publicUrl, enc: encrypted.enc };
 }

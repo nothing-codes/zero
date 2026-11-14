@@ -1,9 +1,12 @@
+import type { MediaEncryption } from "../types";
+import { encryptBlob } from "./e2ee";
 import { MEDIA_BUCKET } from "./media";
 import { SUPABASE_PUBLISHABLE_KEY, SUPABASE_URL, supabase } from "./supabase";
 
 export interface UploadedFile {
   url: string;
   path: string;
+  enc: MediaEncryption;
 }
 
 interface WritableFileLike {
@@ -56,12 +59,14 @@ export async function uploadFileToCloud(
   const name = safeFileName(file.name);
   const dot = name.lastIndexOf(".");
   const ext = dot > 0 ? name.slice(dot + 1).toLowerCase().replace(/[^a-z0-9]/g, "") : "bin";
-  const path = `files/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext || "bin"}`;
+  const path = `files/${Date.now()}-${Math.random().toString(36).slice(2, 10)}.${ext || "bin"}.enc`;
   const endpoint = `${SUPABASE_URL}/storage/v1/object/${MEDIA_BUCKET}/${path
     .split("/")
     .map((part) => encodeURIComponent(part))
     .join("/")}`;
-  const contentType = file.type || "application/octet-stream";
+  const encrypted = await encryptBlob(file);
+  const body = encrypted.blob;
+  const contentType = "application/octet-stream";
 
   await new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -117,12 +122,12 @@ export async function uploadFileToCloud(
       return;
     }
     signal.addEventListener("abort", onAbort, { once: true });
-    xhr.send(file);
+    xhr.send(body);
   });
 
   if (signal.aborted) throw new DOMException("Aborted", "AbortError");
   const { data } = supabase.storage.from(MEDIA_BUCKET).getPublicUrl(path);
-  return { url: data.publicUrl, path };
+  return { url: data.publicUrl, path, enc: encrypted.enc };
 }
 
 export function storagePathFromUrl(url?: string | null): string | null {

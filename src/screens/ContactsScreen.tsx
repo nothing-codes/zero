@@ -4,6 +4,7 @@ import { Avatar } from "../components/Avatar";
 import { ContactPicker } from "../components/ContactPicker";
 import { Button } from "../components/ui";
 import type { Contact } from "../lib/data";
+import { isZeroIdentity } from "../lib/identity";
 import { useAuthedStore } from "../lib/store";
 
 export function ContactsScreen({
@@ -18,7 +19,7 @@ export function ContactsScreen({
 
   // Только настоящие собеседники — у них есть email и remote-чат.
   const contacts = state.chats.filter(
-    (chat) => !chat.group && chat.id !== "c_zero" && Boolean(chat.email),
+    (chat) => !chat.group && chat.id !== "c_zero" && Boolean(chat.email) && !isZeroIdentity(chat),
   );
 
   const pick = (contact: Contact) => {
