@@ -87,20 +87,35 @@ export function ContactPicker({
         bio: profile.bio,
       }));
     }
-    // Без поиска показываем людей, с которыми уже есть настоящий чат.
-    return state.chats
-      .filter((chat) => !chat.group && chat.id !== "c_zero" && Boolean(chat.email) && !isZeroIdentity(chat))
-      .map((chat) => ({
-        id: chat.id,
-        name: chat.name,
-        username: chat.username ?? "",
-        phone: chat.phone ?? "",
-        email: chat.email,
-        avatar: chat.avatar,
-        online: Boolean(chat.online),
-        lastSeen: chat.lastSeen,
-        bio: "",
-      }));
+    // Без поиска показываем людей, с которыми уже есть настоящий чат, и «Избранное».
+    const saved = state.chats.find((chat) => chat.saved || chat.id === "c_saved");
+    const base: Contact[] = saved
+      ? [{
+          id: saved.id,
+          name: saved.name,
+          username: "",
+          phone: "",
+          avatar: saved.avatar,
+          online: false,
+          bio: "",
+        }]
+      : [];
+    return [
+      ...base,
+      ...state.chats
+        .filter((chat) => !chat.group && !chat.saved && chat.id !== "c_saved" && chat.id !== "c_zero" && Boolean(chat.email) && !isZeroIdentity(chat))
+        .map((chat) => ({
+          id: chat.id,
+          name: chat.name,
+          username: chat.username ?? "",
+          phone: chat.phone ?? "",
+          email: chat.email,
+          avatar: chat.avatar,
+          online: Boolean(chat.online),
+          lastSeen: chat.lastSeen,
+          bio: "",
+        })),
+    ];
   }, [needle.length, results, state.chats]);
 
   return (
@@ -111,7 +126,7 @@ export function ContactPicker({
           ref={inputRef}
           value={query}
           onChange={(event) => setQuery(event.target.value)}
-          placeholder="Имя, @username или Gmail"
+          placeholder="@username"
           className="h-full flex-1 bg-transparent text-[15px] outline-none"
           autoFocus
           autoCapitalize="none"
@@ -148,7 +163,7 @@ export function ContactPicker({
 
         {needle.length < 2 ? (
           <p className="t-sub px-3 py-8 text-center text-faint">
-            Введите @username или Gmail человека.
+            Введите @username человека.
           </p>
         ) : null}
 
@@ -156,7 +171,7 @@ export function ContactPicker({
           <p className="t-sub px-3 py-8 text-center text-faint">
             {failed
               ? "Поиск временно недоступен. Проверьте, что схема Supabase выполнена."
-              : "Никого не нашли. Проверьте @username или Gmail."}
+              : "Никого не нашли. Проверьте @username."}
           </p>
         ) : null}
       </div>

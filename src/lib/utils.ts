@@ -139,6 +139,25 @@ export function fileSize(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} МБ`;
 }
 
+const AUDIO_EXTENSIONS = ["mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "opus", "wma", "aiff", "alac"];
+
+export function isAudioFile(file?: { name?: string; mime?: string } | null) {
+  if (!file) return false;
+  if (file.mime?.startsWith("audio/")) return true;
+  const ext = (file.name ?? "").split(".").pop()?.toLowerCase() ?? "";
+  return AUDIO_EXTENSIONS.includes(ext);
+}
+
+/** Разбирает имя музыкального файла на исполнителя и название. */
+export function trackMeta(fileName: string) {
+  const base = fileName.replace(/\.[^.]+$/, "").replace(/_/g, " ").trim();
+  const parts = base.split(/\s+[—–-]\s+/);
+  if (parts.length >= 2) {
+    return { artist: parts[0].trim(), title: parts.slice(1).join(" — ").trim() || base };
+  }
+  return { artist: "Аудио", title: base || "Трек" };
+}
+
 export function formatPhone(dial: string, national: string) {
   const digits = national.replace(/\D/g, "");
   if (!digits) return "";

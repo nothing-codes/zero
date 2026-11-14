@@ -1,5 +1,5 @@
 import type { MessagePayload, User } from "../types";
-import { decryptPayload, encryptPayload, publicKeyFor } from "./e2ee";
+import { decryptPayload, encryptPayload, isEncryptedPayload, publicKeyFor, refreshPeerKey } from "./e2ee";
 import { supabase } from "./supabase";
 
 /**
@@ -75,7 +75,91 @@ export async function upsertProfile(user: User): Promise<void> {
   if (error) throw error;
 }
 
-/** Ищет людей по @username, email или имени. */
+/**
+ * Ищет профиль аккаунта по email. По нему вход отличает существующий
+ * аккаунт (вход) от нового (регистрация), даже если на этом устройстве
+ * ещё нет локальной копии.
+ */
+export async function findRemoteAccount(
+  email: string,
+): Promise<(ZeroProfile & { createdAt?: number }) | null> {
+  const normalized = normalizeEmail(email);
+  if (!normalized) return null;
+
+  const { data, error } = await supabase
+    .from(PROFILE_TABLE)
+    .select("email,username,name,avatar,bio,status,created_at")
+    .eq("email", normalized)
+    .maybeSingle<ZeroProfile & { created_at?: string }>();
+
+  if (error) throw error;
+  if (data) {
+    return {
+      email: normalizeEmail(data.email),
+      username: normalizeUsername(data.username),
+      name: data.name || normalized.split("@")[0],
+      avatar: data.avatar ?? null,
+      bio: data.bio ?? "",
+      status: data.status ?? "",
+      createdAt: data.created_at ? new Date(data.created_at).getTime() : undefined,
+    };
+  }
+
+  // Совместимость со старыми аккаунтами: профиль мог ещё не создаться,
+  // но облачная копия (`zero_states`) или переписка уже есть. Тогда это
+  // точно существующий пользователь, а не новая регистрация.
+  const { data: cloud, error: cloudError } = await supabase
+    .from("zero_states")
+    .select("phone")
+    .eq("phone", normalized)
+    .maybeSingle<{ phone: string }>();
+  if (cloudError) throw cloudError;
+
+  // Имя и @username могли сохраниться в отправленных сообщениях.
+  const { data: rows } = await supabase
+    .from(MESSAGE_TABLE)
+    .select("sender_name,sender_username,sender_avatar")
+    .eq("sender_email", normalized)
+    .order("created_at", { ascending: false })
+    .limit(1);
+  const row = (rows?.[0] ?? null) as
+    | { sender_name?: string; sender_username?: string; sender_avatar?: string | null }
+    | null;
+
+  if (!cloud && !row) return null;
+
+  const fallbackUsername =
+    normalized.split("@")[0].replace(/[^a-z0-9_]/g, "_").slice(0, 24) || "user";
+
+  return {
+    email: normalized,
+    username: normalizeUsername(row?.sender_username ?? "") || fallbackUsername,
+    name: row?.sender_name || fallbackUsername,
+    avatar: row?.sender_avatar ?? null,
+    bio: "",
+    status: "На связи",
+  };
+}
+
+/** Занят ли @username другим аккаунтом. */
+export async function isUsernameTaken(username: string, email: string): Promise<boolean> {
+  const handle = normalizeUsername(username);
+  if (!handle) return false;
+  const { data, error } = await supabase
+    .from(PROFILE_TABLE)
+    .select("email,username")
+    .ilike("username", handle)
+    .limit(20);
+  if (error) throw error;
+  // `_` в LIKE — подстановочный символ, поэтому сверяем username точно.
+  return (data ?? []).some(
+    (row) =>
+      normalizeUsername((row as { username: string }).username) === handle &&
+      normalizeEmail((row as { email: string }).email) !== normalizeEmail(email),
+  );
+}
+
+/** Ищет людей строго по @username. */
 export async function searchProfiles(
   query: string,
   excludeEmail: string,
@@ -93,7 +177,7 @@ export async function searchProfiles(
   const { data, error } = await supabase
     .from(PROFILE_TABLE)
     .select("email,username,name,avatar,bio,status")
-    .or(`username.ilike.%${q}%,email.ilike.%${q}%,name.ilike.%${q}%`)
+    .ilike("username", `%${q}%`)
     .neq("email", normalizeEmail(excludeEmail))
     .limit(20);
 
@@ -157,7 +241,32 @@ export async function decryptRemoteRow(
   const sender = normalizeEmail(row.sender_email);
   const peer = sender === me ? row.recipient_email : row.sender_email;
   const payload = await decryptPayload(me, peer, row.payload);
-  return { ...row, payload };
+  const broken =
+    isEncryptedPayload(row.payload) &&
+    payload.kind === "text" &&
+    payload.text === "Зашифрованное сообщение";
+  if (!broken) return { ...row, payload };
+
+  // Собеседник мог сохранить публичный ключ на секунду позже сообщения.
+  // Даём профилю шанс появиться и пробуем ещё раз без вечной задержки.
+  await new Promise((resolve) => window.setTimeout(resolve, 1200));
+  refreshPeerKey(peer);
+  const retry = await decryptPayload(me, peer, row.payload);
+  return { ...row, payload: retry };
+}
+
+const syncedProfiles = new Set<string>();
+
+/** Гарантирует, что публичный ключ отправителя уже лежит в профиле. */
+async function ensureOwnProfile(user: User) {
+  const email = normalizeEmail(user.email);
+  if (!email || syncedProfiles.has(email)) return;
+  try {
+    await upsertProfile(user);
+    syncedProfiles.add(email);
+  } catch {
+    // Повторим при следующем сообщении — без блокировки отправки.
+  }
 }
 
 export async function sendRemoteMessage(input: {
@@ -173,6 +282,7 @@ export async function sendRemoteMessage(input: {
   const toEmail = normalizeEmail(input.toEmail);
   if (!fromEmail || !toEmail) throw new Error("missing-email");
 
+  await ensureOwnProfile(input.from);
   const payload = await encryptPayload(fromEmail, toEmail, input.payload);
 
   const { data, error } = await supabase
@@ -237,6 +347,38 @@ export async function editRemoteMessage(input: {
   if (error) throw error;
 }
 
+/**
+ * Правит сообщение группы: у каждого получателя свой шифр, поэтому
+ * обновляем копии построчно, а не одним запросом.
+ */
+export async function editGroupMessage(input: {
+  senderEmail: string;
+  recipients: { email: string }[];
+  clientId: string;
+  payload: MessagePayload;
+}): Promise<void> {
+  const sender = normalizeEmail(input.senderEmail);
+  if (!sender) throw new Error("missing-email");
+  const copies = await Promise.all(
+    input.recipients
+      .map((recipient) => normalizeEmail(recipient.email))
+      .filter((email) => Boolean(email))
+      .map(async (email) => ({
+        email,
+        payload: await encryptPayload(sender, email, input.payload),
+      })),
+  );
+  for (const copy of copies) {
+    const { error } = await supabase
+      .from(MESSAGE_TABLE)
+      .update({ payload: copy.payload as unknown as MessagePayload })
+      .eq("sender_email", sender)
+      .eq("client_id", input.clientId)
+      .eq("recipient_email", copy.email);
+    if (error) throw error;
+  }
+}
+
 /** Удаляет сообщение из базы у всех участников. */
 export async function deleteRemoteMessage(input: {
   id?: string;
@@ -254,6 +396,51 @@ export async function deleteRemoteMessage(input: {
 
   const { error } = await query;
   if (error) throw error;
+}
+
+/** Полностью очищает диалог в базе (для «Очистить историю»). */
+export async function deleteConversation(
+  meEmail: string,
+  peerEmail: string,
+): Promise<void> {
+  const me = normalizeEmail(meEmail);
+  const peer = normalizeEmail(peerEmail);
+  if (!me || !peer) return;
+  const { error } = await supabase
+    .from(MESSAGE_TABLE)
+    .delete()
+    .eq("conversation", conversationKey(me, peer));
+  if (error) throw error;
+}
+
+/** Удаляет пачку сообщений по id (используется для групп). */
+export async function deleteRemoteMessagesByIds(ids: string[]): Promise<void> {
+  const unique = [...new Set(ids.filter(Boolean))];
+  for (let index = 0; index < unique.length; index += 80) {
+    const chunk = unique.slice(index, index + 80);
+    if (chunk.length === 0) continue;
+    const { error } = await supabase.from(MESSAGE_TABLE).delete().in("id", chunk);
+    if (error) throw error;
+  }
+}
+
+/** Удаляет мои копии групповых сообщений по client_id. */
+export async function deleteOwnMessagesByClientIds(
+  meEmail: string,
+  clientIds: string[],
+): Promise<void> {
+  const me = normalizeEmail(meEmail);
+  const unique = [...new Set(clientIds.filter(Boolean))];
+  if (!me || unique.length === 0) return;
+  for (let index = 0; index < unique.length; index += 80) {
+    const chunk = unique.slice(index, index + 80);
+    const { error } = await supabase
+      .from(MESSAGE_TABLE)
+      .delete()
+      .eq("sender_email", me)
+      .in("client_id", chunk);
+    if (error) throw error;
+  }
 }
 
 /** Сохраняет блокировку пользователя. Сервер сам отклонит @zero. */

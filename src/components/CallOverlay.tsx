@@ -1,12 +1,15 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { motion } from "motion/react";
+import { animate, motion, useMotionValue, useTransform } from "motion/react";
 import {
+  Bluetooth,
+  Check,
+  Headphones,
   Mic,
   MicOff,
   Phone,
   PhoneOff,
+  Speaker,
   Volume2,
-  VolumeX,
 } from "lucide-react";
 import { useAuthedStore } from "../lib/store";
 import { playTone } from "../lib/feedback";
@@ -25,6 +28,15 @@ import { Avatar } from "./Avatar";
 
 type Phase = "incoming" | "calling" | "connecting" | "active" | "failed";
 type Direction = "in" | "out" | "missed";
+type AudioOutput = { deviceId: string; label: string };
+type SinkAudioElement = HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
+
+function OutputIcon({ label }: { label: string }) {
+  if (/bluetooth|блютус|bt/i.test(label)) return <Bluetooth size={20} />;
+  if (/headphone|наушник|airpod|buds|гарнитур|headset/i.test(label)) return <Headphones size={20} />;
+  if (/speaker|динамик|monitor|display|hdmi/i.test(label)) return <Speaker size={20} />;
+  return <Volume2 size={20} />;
+}
 
 export function CallOverlay({
   chatId,
@@ -59,10 +71,16 @@ export function CallOverlay({
   const [muted, setMuted] = useState(false);
   const mutedRef = useRef(muted);
   mutedRef.current = muted;
-  const [speaker, setSpeaker] = useState(false);
-  const speakerRef = useRef(speaker);
-  speakerRef.current = speaker;
+  const [outputs, setOutputs] = useState<AudioOutput[]>([]);
+  const [outputId, setOutputId] = useState("default");
+  const outputIdRef = useRef(outputId);
+  outputIdRef.current = outputId;
+  const [routeOpen, setRouteOpen] = useState(false);
+  const [sinkSupported] = useState(() => typeof HTMLMediaElement !== "undefined" && "setSinkId" in HTMLMediaElement.prototype);
   const [error, setError] = useState<string | null>(null);
+  const swipeX = useMotionValue(0);
+  const rejectHint = useTransform(swipeX, [-120, -28, 0], [1, 0, 0]);
+  const acceptHint = useTransform(swipeX, [0, 28, 120], [0, 0, 1]);
 
   const finishCall = (direction: Direction) => {
     if (ended.current) return;
@@ -89,7 +107,42 @@ export function CallOverlay({
     stream.getAudioTracks().forEach((track) => {
       track.enabled = !mutedRef.current;
     });
+    void refreshOutputs();
     return stream;
+  };
+
+  const refreshOutputs = async () => {
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      setOutputs(
+        devices
+          .filter((device) => device.kind === "audiooutput")
+          .map((device) => ({
+            deviceId: device.deviceId,
+            label: device.label?.trim() || "Аудиовыход",
+          })),
+      );
+    } catch {
+      setOutputs([]);
+    }
+  };
+
+  const applyOutput = async (element: HTMLAudioElement, deviceId: string) => {
+    const audio = element as SinkAudioElement;
+    if (!audio.setSinkId) return;
+    try {
+      await audio.setSinkId(deviceId);
+    } catch {
+      /* маршрут управляется системой */
+    }
+  };
+
+  const chooseOutput = async (deviceId: string) => {
+    setOutputId(deviceId);
+    setRouteOpen(false);
+    haptic(5);
+    const element = audioRef.current;
+    if (element) await applyOutput(element, deviceId);
   };
 
   const flushIce = async () => {
@@ -106,36 +159,22 @@ export function CallOverlay({
     }
   };
 
-  // Ждём, пока соберутся ICE-кандидаты, чтобы отправить их прямо в SDP.
-  // Собеседник подписывается на комнату с задержкой, и отдельные candidate-
-  // сообщения могли бы потеряться до его подключения.
-  const waitForIce = (pc: RTCPeerConnection) =>
-    new Promise<void>((resolve) => {
-      if (pc.iceGatheringState === "complete") {
-        resolve();
-        return;
-      }
-      const done = () => {
-        window.clearTimeout(timeout);
-        pc.removeEventListener("icegatheringstatechange", check);
-        resolve();
-      };
-      const check = () => {
-        if (pc.iceGatheringState === "complete") done();
-      };
-      const timeout = window.setTimeout(done, 2500);
-      pc.addEventListener("icegatheringstatechange", check);
-    });
-
   const createPeer = (stream: MediaStream) => {
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    // Trickle ICE: кандидаты уходят сразу, не дожидаясь полной сборки SDP.
+    // Это заметно сокращает время до первого звука.
+    const pc = new RTCPeerConnection({
+      iceServers: ICE_SERVERS,
+      iceCandidatePoolSize: 4,
+      bundlePolicy: "max-bundle",
+    });
     pcRef.current = pc;
     stream.getAudioTracks().forEach((track) => pc.addTrack(track, stream));
     pc.ontrack = (event) => {
       const [remote] = event.streams;
       if (!remote || !audioRef.current) return;
       audioRef.current.srcObject = remote;
-      audioRef.current.volume = speakerRef.current ? 1 : 0.85;
+      audioRef.current.volume = 1;
+      void applyOutput(audioRef.current, outputIdRef.current);
       void audioRef.current.play().catch(() => undefined);
     };
     pc.onicecandidate = (event) => {
@@ -167,7 +206,6 @@ export function CallOverlay({
       const pc = createPeer(stream);
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      await waitForIce(pc);
       if (ended.current) return;
       await sendSignal(channelRef.current, {
         client: clientId.current,
@@ -196,7 +234,6 @@ export function CallOverlay({
       await flushIce();
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      await waitForIce(pc);
       if (ended.current) return;
       await sendSignal(channelRef.current, {
         client: clientId.current,
@@ -348,12 +385,13 @@ export function CallOverlay({
     haptic(5);
   };
 
-  const toggleSpeaker = () => {
-    const next = !speaker;
-    setSpeaker(next);
-    if (audioRef.current) audioRef.current.volume = next ? 1 : 0.85;
-    haptic(5);
-  };
+  useEffect(() => {
+    const media = navigator.mediaDevices;
+    if (!media?.addEventListener) return;
+    const handler = () => { void refreshOutputs(); };
+    media.addEventListener("devicechange", handler);
+    return () => media.removeEventListener("devicechange", handler);
+  }, []);
 
   const label =
     phase === "active"
@@ -365,6 +403,11 @@ export function CallOverlay({
           : phase === "failed"
             ? error ?? "Не удалось соединиться"
             : "Соединяем…";
+
+  const routeLabel =
+    outputId === "default"
+      ? "Динамик"
+      : outputs.find((output) => output.deviceId === outputId)?.label ?? "Аудиовыход";
 
   const ring = phase === "incoming" || phase === "calling";
 
@@ -387,55 +430,92 @@ export function CallOverlay({
 
       <div className="relative flex h-full w-full max-w-[520px] flex-col px-6 pt-[max(18px,env(safe-area-inset-top,0px))] pb-[max(24px,env(safe-area-inset-bottom,0px))]">
         <div className="relative flex min-h-0 flex-1 flex-col items-center justify-center">
-          <div className="relative">
-            {ring ? <span className="pulse-ring absolute inset-0 rounded-full border border-white/15" /> : null}
-            {ring ? (
-              <span
-                className="pulse-ring absolute inset-0 rounded-full border border-white/10"
-                style={{ animationDelay: "1.2s" }}
+          {incoming && phase === "incoming" ? (
+            <>
+              <motion.div style={{ opacity: rejectHint }} className="pointer-events-none absolute left-0 top-1/2 flex -translate-y-1/2 flex-col items-center gap-2 text-danger">
+                <span className="grid size-12 place-items-center rounded-full border border-danger/25 bg-danger/10"><PhoneOff size={20} /></span>
+                <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-danger/70">Отклонить</span>
+              </motion.div>
+              <motion.div style={{ opacity: acceptHint }} className="pointer-events-none absolute right-0 top-1/2 flex -translate-y-1/2 flex-col items-center gap-2 text-online">
+                <span className="grid size-12 place-items-center rounded-full border border-online/25 bg-online/10"><Phone size={20} /></span>
+                <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-online/80">Принять</span>
+              </motion.div>
+            </>
+          ) : null}
+
+          <motion.div
+            drag={incoming && phase === "incoming" ? "x" : false}
+            dragConstraints={{ left: 0, right: 0 }}
+            dragElastic={0.55}
+            dragMomentum={false}
+            style={{ x: swipeX }}
+            onDragEnd={(_, info) => {
+              if (info.offset.x > 92) {
+                void acceptIncoming();
+                return;
+              }
+              if (info.offset.x < -92) {
+                hangUp();
+                return;
+              }
+              animate(swipeX, 0, { type: "spring", stiffness: 420, damping: 32 });
+            }}
+            className={cn("relative flex flex-col items-center", incoming && phase === "incoming" && "cursor-grab touch-pan-y active:cursor-grabbing")}
+          >
+            <div className="relative">
+              {ring ? <span className="pulse-ring absolute inset-0 rounded-full border border-white/15" /> : null}
+              {ring ? (
+                <span
+                  className="pulse-ring absolute inset-0 rounded-full border border-white/10"
+                  style={{ animationDelay: "1.2s" }}
+                />
+              ) : null}
+              <Avatar
+                name={name}
+                src={chat?.avatar}
+                size={136}
+                liquid
+                className="shadow-[0_30px_90px_-24px_rgba(0,0,0,0.9)] ring-1 ring-white/15"
               />
-            ) : null}
-            <Avatar
-              name={name}
-              src={chat?.avatar}
-              size={136}
-              liquid
-              className="shadow-[0_30px_90px_-24px_rgba(0,0,0,0.9)] ring-1 ring-white/15"
-            />
-          </div>
+            </div>
 
-          <h1 className="t-title mt-7 max-w-full truncate px-4 text-white">{name}</h1>
+            <h1 className="t-title mt-7 max-w-full truncate px-4 text-white">{name}</h1>
 
-          <p className={cn("t-sub mt-2 flex items-center gap-2", phase === "failed" ? "text-danger" : "text-white/55")}>
-            {phase === "calling" ? (
-              <span className="flex items-center gap-1">
-                {[0, 1, 2].map((i) => (
-                  <span
-                    key={i}
-                    className="typing-dot size-1 rounded-full bg-white/60"
-                    style={{ animationDelay: `${i * 0.18}s` }}
-                  />
-                ))}
-              </span>
-            ) : phase === "active" ? (
-              <span className="size-1.5 rounded-full bg-online" />
+            <p className={cn("t-sub mt-2 flex items-center gap-2", phase === "failed" ? "text-danger" : "text-white/55")}>
+              {phase === "calling" ? (
+                <span className="flex items-center gap-1">
+                  {[0, 1, 2].map((i) => (
+                    <span
+                      key={i}
+                      className="typing-dot size-1 rounded-full bg-white/60"
+                      style={{ animationDelay: `${i * 0.18}s` }}
+                    />
+                  ))}
+                </span>
+              ) : phase === "active" ? (
+                <span className="size-1.5 rounded-full bg-online" />
+              ) : null}
+              <span className={phase === "active" ? "t-num" : undefined}>{label}</span>
+            </p>
+
+            {incoming && phase === "incoming" ? (
+              <p className="t-time mt-5 text-center text-white/30">Свайп вправо — принять, влево — отклонить</p>
             ) : null}
-            <span className={phase === "active" ? "t-num" : undefined}>{label}</span>
-          </p>
+          </motion.div>
         </div>
 
         <audio ref={audioRef} autoPlay playsInline className="hidden" />
 
         {incoming && (phase === "incoming" || phase === "connecting" || phase === "failed") ? (
-          <div className="mt-auto grid w-full grid-cols-2 gap-6 px-8 pb-4">
+          <div className="mt-auto grid w-full grid-cols-2 gap-5 px-7 pb-4">
             <motion.button
               type="button"
               whileTap={{ scale: 0.93 }}
               onClick={hangUp}
               aria-label="Отклонить звонок"
-              className="grid h-[66px] w-full place-items-center rounded-full bg-danger text-white shadow-[0_16px_44px_-10px_rgba(255,50,50,0.35)]"
+              className="grid h-[68px] w-full place-items-center rounded-full bg-danger text-white shadow-[0_18px_50px_-12px_rgba(255,60,60,0.55)]"
             >
-              <PhoneOff size={25} strokeWidth={1.9} />
+              <PhoneOff size={26} strokeWidth={1.9} />
             </motion.button>
             <motion.button
               type="button"
@@ -443,9 +523,9 @@ export function CallOverlay({
               onClick={() => { void acceptIncoming(); }}
               disabled={phase === "connecting"}
               aria-label="Принять звонок"
-              className="grid h-[66px] w-full place-items-center rounded-full bg-white text-[#0b0b0c] shadow-[0_16px_44px_-10px_rgba(255,255,255,0.25)] disabled:opacity-60"
+              className="grid h-[68px] w-full place-items-center rounded-full bg-online text-white shadow-[0_18px_50px_-12px_rgba(48,209,88,0.55)] disabled:opacity-60"
             >
-              <Phone size={25} strokeWidth={1.9} />
+              <Phone size={26} strokeWidth={1.9} />
             </motion.button>
           </div>
         ) : (
@@ -470,16 +550,56 @@ export function CallOverlay({
             </motion.button>
 
             <CallButton
-              label={speaker ? "Выключить громкость" : "Включить громкость"}
-              active={speaker}
+              label={`Звук звонка: ${routeLabel}`}
+              active={routeOpen}
               className="justify-self-end"
-              onClick={toggleSpeaker}
+              onClick={() => { setRouteOpen(true); void refreshOutputs(); }}
             >
-              {speaker ? <Volume2 size={20} /> : <VolumeX size={20} />}
+              <OutputIcon label={routeLabel} />
             </CallButton>
           </div>
         )}
       </div>
+
+      {routeOpen ? (
+        <div className="absolute inset-0 z-[96] flex items-end justify-center bg-black/60 px-3 pb-[max(12px,env(safe-area-inset-bottom,0px))] backdrop-blur-sm" onClick={() => setRouteOpen(false)}>
+          <motion.div
+            initial={{ y: 44, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            transition={{ type: "spring", stiffness: 380, damping: 32 }}
+            onClick={(event) => event.stopPropagation()}
+            className="w-full max-w-[420px] overflow-hidden rounded-[26px] border border-white/10 bg-[#151517] p-3 shadow-[0_-20px_80px_rgba(0,0,0,0.7)]"
+          >
+            <div className="mx-auto mb-4 mt-1 h-1 w-10 rounded-full bg-white/[0.18]" />
+            <div className="px-2 pb-2">
+              <p className="text-[17px] font-semibold text-white">Звук звонка</p>
+              <p className="mt-1 text-[12px] leading-snug text-white/45">
+                {sinkSupported ? "Куда выводить голос собеседника" : "Браузер использует системный маршрут — выбор недоступен"}
+              </p>
+            </div>
+            <div className="space-y-1">
+              {[{ deviceId: "default", label: "Динамик" }, ...outputs.filter((output) => output.deviceId !== "default")].map((option) => {
+                const active = option.deviceId === outputId;
+                return (
+                  <button
+                    key={option.deviceId}
+                    type="button"
+                    onClick={() => { void chooseOutput(option.deviceId); }}
+                    className={cn("flex w-full items-center gap-3 rounded-[14px] px-3 py-3 text-left transition-colors", active ? "bg-white/[0.08]" : "hover:bg-white/[0.05]")}
+                  >
+                    <span className={cn("grid size-9 shrink-0 place-items-center rounded-full", active ? "bg-white text-black" : "bg-white/8 text-white/70")}>
+                      <OutputIcon label={option.label} />
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-[14px] text-white/85">{option.label}</span>
+                    {active ? <Check size={17} className="shrink-0 text-white" /> : null}
+                  </button>
+                );
+              })}
+            </div>
+            <button type="button" onClick={() => setRouteOpen(false)} className="mt-3 h-11 w-full rounded-[14px] bg-white/8 text-[14px] font-medium text-white/80 transition-colors hover:bg-white/12">Готово</button>
+          </motion.div>
+        </div>
+      ) : null}
     </motion.div>
   );
 }

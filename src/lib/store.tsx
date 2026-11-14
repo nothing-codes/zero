@@ -12,7 +12,9 @@ import type {
   AppState,
   CallRecord,
   Chat,
+  GroupMember,
   Message,
+  MessageGroupInfo,
   MessageKind,
   MessagePayload,
   MessageStatus,
@@ -26,8 +28,12 @@ import { loadCloudState, saveCloudState } from "./cloud";
 import { supabase } from "./supabase";
 import {
   blockRemoteUser,
+  deleteConversation,
+  deleteOwnMessagesByClientIds,
   deleteRemoteMessage,
+  deleteRemoteMessagesByIds,
   decryptRemoteRow,
+  editGroupMessage,
   editRemoteMessage,
   loadConversation,
   loadRecentIncoming,
@@ -38,11 +44,21 @@ import {
   subscribeToIncoming,
   upsertProfile,
   type RemoteMessageRow,
+  type ZeroProfile,
 } from "./chat";
+import {
+  applyPollVotes,
+  castPollVote,
+  loadPollVotes,
+  pollIdOf,
+  subscribePollVotes,
+} from "./polls";
+import { registerDevice } from "./devices";
+import { subscribePresence } from "./presence";
 import { deleteStoragePaths, storagePathFromUrl } from "./files";
 import { isZeroIdentity } from "./identity";
 import { migrateLegacyContent } from "./migrate";
-import { haptic, stripEmoji, uid } from "./utils";
+import { haptic, isAudioFile, stripEmoji, uid } from "./utils";
 import {
   playTone,
   setBadge,
@@ -50,6 +66,23 @@ import {
 } from "./feedback";
 
 const STORAGE_KEY = "zero:state:v1";
+export const SAVED_CHAT_ID = "c_saved";
+
+function savedChat(): Chat {
+  return {
+    id: SAVED_CHAT_ID,
+    name: "Избранное",
+    saved: true,
+    unread: 0,
+    messages: [],
+    historyLoaded: true,
+  };
+}
+
+function withSavedChat(chats: Chat[]): Chat[] {
+  if (chats.some((chat) => chat.id === SAVED_CHAT_ID || chat.saved)) return chats;
+  return [savedChat(), ...chats];
+}
 
 function cleanUser(user: User | null): User | null {
   if (!user) return user;
@@ -119,7 +152,7 @@ function mergeState(raw: unknown): AppState {
   const chats =
     version < 2
       ? (JSON.parse(JSON.stringify(base.chats)) as Chat[])
-      : cleanChats(parsed.chats);
+      : withSavedChat(cleanChats(parsed.chats));
 
   const accounts: Record<string, User> = {};
   for (const [key, account] of Object.entries(parsed.accounts ?? {})) {
@@ -152,6 +185,25 @@ function accountKey(email: string) {
   return email.trim().toLowerCase();
 }
 
+/** Восстанавливает аккаунт из публичного профиля на новом устройстве. */
+function userFromProfile(profile: ZeroProfile & { createdAt?: number }): User {
+  const email = accountKey(profile.email);
+  const fallback = email.split("@")[0] || "user";
+  return {
+    id: uid("u"),
+    name: stripEmoji(profile.name) || fallback,
+    username:
+      normalizeUsername(profile.username) ||
+      fallback.replace(/[^a-z0-9_]/g, "_").slice(0, 24) ||
+      "user",
+    email,
+    bio: stripEmoji(profile.bio ?? ""),
+    status: stripEmoji(profile.status ?? "") || "На связи",
+    avatar: profile.avatar ?? null,
+    createdAt: profile.createdAt ?? Date.now(),
+  };
+}
+
 function previewOf(message: Message): string {
   switch (message.kind) {
     case "sticker":
@@ -163,7 +215,9 @@ function previewOf(message: Message): string {
     case "photo":
       return message.photo?.caption ? `Фото · ${message.photo.caption}` : "Фотография";
     case "file":
-      return `Файл · ${message.file?.name ?? ""}`;
+      return isAudioFile(message.file)
+        ? `Музыка · ${message.file?.name ?? ""}`
+        : `Файл · ${message.file?.name ?? ""}`;
     case "location":
       return `Геопозиция · ${message.location?.title ?? ""}`;
     case "poll":
@@ -173,7 +227,18 @@ function previewOf(message: Message): string {
   }
 }
 
-function payloadOf(message: Message): MessagePayload {
+function groupInfoOf(chat: Chat): MessageGroupInfo | undefined {
+  if (!chat.group?.key) return undefined;
+  return {
+    key: chat.group.key,
+    title: chat.name,
+    kind: chat.group.kind ?? "group",
+    members: chat.group.memberList?.map((member) => member.email) ?? [],
+    ownerEmail: chat.group.ownerEmail,
+  };
+}
+
+function payloadOf(message: Message, chat?: Chat): MessagePayload {
   return {
     kind: message.kind,
     text: message.text,
@@ -187,25 +252,18 @@ function payloadOf(message: Message): MessagePayload {
     replyTo: message.replyTo,
     forwardedFrom: message.forwardedFrom,
     edited: message.edited,
+    group: chat ? groupInfoOf(chat) : message.group,
   };
 }
 
 export function chatPreview(chat: Chat): string {
   const last = chat.messages[chat.messages.length - 1];
-  if (!last) return "Нет сообщений";
+  if (!last) return chat.saved ? "Личные заметки" : "Нет сообщений";
   if (chat.typing) return "печатает…";
-  const prefix =
-    last.kind === "text"
-      ? ""
-      : last.kind === "sticker"
-        ? ""
-        : last.kind === "voice"
-          ? ""
-          : last.kind === "photo"
-            ? ""
-            : "";
-  if (last.fromMe && last.kind === "text") return `Вы: ${last.text ?? ""}`;
-  if (last.fromMe) return `Вы: ${previewOf(last)}`;
+  if (last.fromMe) {
+    return last.kind === "text" ? `Вы: ${last.text ?? ""}` : `Вы: ${previewOf(last)}`;
+  }
+  const prefix = chat.group && last.sender ? `${last.sender}: ` : "";
   return `${prefix}${previewOf(last)}`;
 }
 
@@ -218,7 +276,11 @@ interface StoreValue {
   toast: ToastData | null;
   dismissToast: () => void;
   setOnboarded: () => void;
-  loginExisting: (email: string) => User | null;
+  /** Входит в существующий аккаунт; профиль из базы нужен на новом устройстве. */
+  loginExisting: (
+    email: string,
+    profile?: (ZeroProfile & { createdAt?: number }) | null,
+  ) => User | null;
   completeSignup: (input: {
     email: string;
     name: string;
@@ -262,9 +324,23 @@ interface StoreValue {
     avatar?: string | null;
     remote?: boolean;
   }) => string;
+  createGroup: (input: {
+    name: string;
+    kind: "group" | "channel";
+    avatar?: string | null;
+    description?: string;
+    members: GroupMember[];
+  }) => string;
+  updateGroup: (
+    chatId: string,
+    patch: { name?: string; avatar?: string | null; description?: string },
+  ) => void;
+  addGroupMembers: (chatId: string, members: GroupMember[]) => void;
+  removeGroupMember: (chatId: string, email: string) => void;
   addCall: (call: Omit<CallRecord, "id" | "at">) => void;
-  clearMessages: (chatId: string) => void;
+  clearMessages: (chatId: string) => Promise<boolean>;
   blockChat: (chatId: string) => Promise<boolean>;
+  syncPollVotes: (chatId: string) => Promise<void>;
 }
 
 const StoreContext = createContext<StoreValue | null>(null);
@@ -313,12 +389,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         if (!remote?.chats) return;
         commit((prev) => {
           if (prev.user?.id !== currentUser.id) return prev;
+          // Локальное состояние — источник истины. Восстанавливаем облачную
+          // копию только на новом устройстве, где ещё нет живой истории.
+          // Иначе удалённые чаты и очищенная история «возвращались» бы.
+          const hasRealHistory = prev.chats.some(
+            (chat) =>
+              !chat.saved &&
+              chat.id !== "c_zero" &&
+              (chat.remote || chat.group || chat.messages.length > 3),
+          );
+          if (hasRealHistory) return prev;
           const localMessages = prev.chats.reduce((sum, chat) => sum + chat.messages.length, 0);
           const remoteMessages = remote.chats.reduce((sum, chat) => sum + chat.messages.length, 0);
           if (remoteMessages <= localMessages) return prev;
           return {
             ...prev,
-            chats: remote.chats,
+            chats: withSavedChat(cleanChats(remote.chats)),
             calls: Array.isArray(remote.calls) ? remote.calls : prev.calls,
             settings: { ...prev.settings, ...remote.settings },
           };
@@ -346,6 +432,48 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     void upsertProfile(state.user).catch(() => undefined);
     migrateLegacyContent(state.user.email);
   }, [state.user]);
+
+  // Онлайн-статусы в реальном времени. Presence обновляет точку у аватара
+  // и «был(а) в сети…» у всех собеседников, а не только после сообщения.
+  useEffect(() => {
+    const currentUser = state.user;
+    if (!currentUser?.email) return;
+    const session = subscribePresence(
+      {
+        email: currentUser.email,
+        name: currentUser.name,
+        username: currentUser.username,
+        avatar: currentUser.avatar,
+      },
+      (map) => {
+        commit((prev) => ({
+          ...prev,
+          chats: prev.chats.map((chat) => {
+            if (!chat.email || chat.group || chat.saved) return chat;
+            const entry = map[normalizeEmail(chat.email)];
+            if (entry) {
+              if (chat.online && chat.lastSeen) return chat;
+              return { ...chat, online: true, lastSeen: Math.max(chat.lastSeen ?? 0, entry.at) };
+            }
+            if (!chat.online) return chat;
+            return { ...chat, online: false, lastSeen: Date.now() };
+          }),
+        }));
+      },
+    );
+    return () => session.stop();
+  }, [state.user?.id, state.user?.name, state.user?.username, state.user?.avatar, commit]);
+
+  // Активные устройства: регистрируем этот браузер и обновляем heartbeat.
+  useEffect(() => {
+    const email = state.user?.email;
+    if (!email) return;
+    void registerDevice(email).catch(() => undefined);
+    const timer = window.setInterval(() => {
+      void registerDevice(email).catch(() => undefined);
+    }, 4 * 60_000);
+    return () => window.clearInterval(timer);
+  }, [state.user?.email]);
 
   // Theme + motion preferences
   useEffect(() => {
@@ -404,11 +532,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         Boolean(chat) &&
         (chat!.unread > 0 || chat!.messages.some((m) => m.fresh && !m.fromMe));
       const shouldSendReceipt =
-        Boolean(chat?.remote) &&
+        Boolean(chat) &&
         Boolean(meEmail) &&
-        Boolean(peerEmail) &&
         current.settings.readReceipts &&
-        hasUnread;
+        hasUnread &&
+        (Boolean(chat?.remote) || Boolean(chat?.group));
 
       commit((prev) => ({
         ...prev,
@@ -424,7 +552,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       }));
 
       if (shouldSendReceipt) {
-        void markConversationRead(meEmail, peerEmail).catch(() => undefined);
+        if (chat?.group) {
+          for (const member of chat.group.memberList ?? []) {
+            if (!member.email || normalizeEmail(member.email) === meEmail) continue;
+            void markConversationRead(meEmail, member.email).catch(() => undefined);
+          }
+        } else if (peerEmail) {
+          void markConversationRead(meEmail, peerEmail).catch(() => undefined);
+        }
       }
     },
     [commit],
@@ -441,7 +576,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   );
 
   const receiveMessage = useCallback(
-    (chatId: string, data: SendPayload, meta?: { id?: string; at?: number }) => {
+    (chatId: string, data: SendPayload, meta?: { id?: string; at?: number; sender?: string }) => {
       const chat = stateRef.current.chats.find((c) => c.id === chatId);
       if (!chat) return;
       if (meta?.id && chat.messages.some((message) => message.id === meta.id)) return;
@@ -451,6 +586,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         fromMe: false,
         at: meta?.at ?? Date.now(),
         status: undefined,
+        sender: meta?.sender,
         ...data,
         fresh: true,
         remoteId: meta?.id,
@@ -554,6 +690,47 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [commit],
   );
 
+  const pushGroupToRemote = useCallback(
+    async (chat: Chat, message: Message, data: SendPayload): Promise<boolean> => {
+      const current = stateRef.current.user;
+      const members = chat.group?.memberList?.filter((member) => member.email) ?? [];
+      if (!current?.email || members.length === 0) return false;
+      const payload = payloadOf(message, chat);
+      const results = await Promise.allSettled(
+        members.map((member) =>
+          sendRemoteMessage({
+            from: current,
+            toEmail: member.email,
+            toUsername: member.username ?? "",
+            toName: member.name,
+            payload,
+            clientId: message.id,
+            at: message.at,
+          }),
+        ),
+      );
+      const remoteId = results.find(
+        (result): result is PromiseFulfilledResult<string> => result.status === "fulfilled",
+      )?.value;
+      if (!remoteId) return false;
+      commit((prev) => ({
+        ...prev,
+        chats: prev.chats.map((c) =>
+          c.id === chat.id
+            ? {
+                ...c,
+                messages: c.messages.map((m) =>
+                  m.id === message.id ? { ...m, remoteId } : m,
+                ),
+              }
+            : c,
+        ),
+      }));
+      return true;
+    },
+    [commit],
+  );
+
   const sendMessage = useCallback(
     (chatId: string, data: SendPayload): string | undefined => {
       const chat = stateRef.current.chats.find((c) => c.id === chatId);
@@ -565,6 +742,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         at: Date.now(),
         status: "sending",
         ...data,
+        ...(chat.group ? { group: groupInfoOf(chat) } : {}),
       };
       commit((prev) => ({
         ...prev,
@@ -585,7 +763,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         (data.kind === "videoNote" && data.videoNote?.src?.startsWith("blob:")) ||
         (data.kind === "file" && Boolean(data.file?.pending));
       if (!pendingMedia) {
-        if (chat.remote) {
+        if (chat.group) {
+          void pushGroupToRemote(chat, message, data).then((ok) => {
+            if (ok) updateMessageStatus(chatId, message.id, "sent");
+          });
+        } else if (chat.remote) {
           void pushToRemote(chat, message, data).then((ok) => {
             if (ok) updateMessageStatus(chatId, message.id, "sent");
           });
@@ -596,7 +778,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
       return message.id;
     },
-    [commit, pushToRemote, updateMessageStatus],
+    [commit, pushGroupToRemote, pushToRemote, updateMessageStatus],
   );
 
   const setMessageMediaSource = useCallback(
@@ -628,17 +810,22 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const chat = stateRef.current.chats.find((item) => item.id === chatId);
       const message = chat?.messages.find((item) => item.id === messageId);
       if (!chat || !message) return;
-      const payload: SendPayload =
-        kind === "voice"
-          ? { kind: "voice", voice: message.voice }
+      const payload: SendPayload = {
+        ...(kind === "voice"
+          ? { kind: "voice" as const, voice: message.voice }
           : kind === "videoNote"
-            ? { kind: "videoNote", videoNote: message.videoNote }
-            : { kind: "file", file: message.file };
-      void pushToRemote(chat, message, payload).then((ok) => {
+            ? { kind: "videoNote" as const, videoNote: message.videoNote }
+            : { kind: "file" as const, file: message.file }),
+        ...(chat.group ? { group: groupInfoOf(chat) } : {}),
+      };
+      const push = chat.group
+        ? pushGroupToRemote(chat, message, payload)
+        : pushToRemote(chat, message, payload);
+      void push.then((ok) => {
         if (ok) updateMessageStatus(chatId, messageId, "sent");
       });
     },
-    [commit, pushToRemote, updateMessageStatus],
+    [commit, pushGroupToRemote, pushToRemote, updateMessageStatus],
   );
 
   const forwardMessage = useCallback(
@@ -662,6 +849,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         pinned: false,
         fresh: false,
         reactions: undefined,
+        group: undefined,
       };
       commit((prev) => ({
         ...prev,
@@ -675,8 +863,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
       const target = stateRef.current.chats.find((c) => c.id === targetChatId);
       if (target) {
-        if (target.remote) {
-          void pushToRemote(target, clone, payloadOf(clone)).then((ok) => {
+        if (target.group) {
+          void pushGroupToRemote(target, clone, payloadOf(clone, target)).then((ok) => {
+            if (ok) updateMessageStatus(targetChatId, clone.id, "sent");
+          });
+        } else if (target.remote) {
+          void pushToRemote(target, clone, payloadOf(clone, target)).then((ok) => {
             if (ok) updateMessageStatus(targetChatId, clone.id, "sent");
           });
         } else {
@@ -684,7 +876,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [commit, pushToRemote, updateMessageStatus],
+    [commit, pushGroupToRemote, pushToRemote, updateMessageStatus],
   );
 
   const setActiveChat = useCallback((id: string | null) => {
@@ -791,9 +983,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return false;
       }
 
-      const payload: MessagePayload = { ...payloadOf(message), text: value, edited: true };
-      if (chat.remote && chat.email) {
-        const meEmail = current.user?.email ?? "";
+      const payload: MessagePayload = { ...payloadOf(message, chat), text: value, edited: true };
+      const meEmail = current.user?.email ?? "";
+      if (chat.group) {
+        try {
+          await editGroupMessage({
+            senderEmail: meEmail,
+            recipients: chat.group.memberList ?? [],
+            clientId: message.id,
+            payload,
+          });
+        } catch {
+          return false;
+        }
+      } else if (chat.remote && chat.email) {
         try {
           await editRemoteMessage({
             id: message.remoteId,
@@ -929,38 +1132,134 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [commit],
   );
 
+  const applyVotesToPolls = useCallback(
+    (pollIds: string[], votes: Awaited<ReturnType<typeof loadPollVotes>>) => {
+      const ids = new Set(pollIds.filter(Boolean));
+      if (ids.size === 0) return;
+      const me = normalizeEmail(stateRef.current.user?.email ?? "");
+      commit((prev) => {
+        let anyChanged = false;
+        const chats = prev.chats.map((chat) => {
+          let chatChanged = false;
+          const messages = chat.messages.map((message) => {
+            if (!message.poll) return message;
+            const pollId = pollIdOf(message.poll, message.remoteId ?? message.id);
+            if (!ids.has(pollId)) return message;
+            const relevant = votes.filter((vote) => vote.poll_id === pollId);
+            chatChanged = true;
+            return {
+              ...message,
+              poll: applyPollVotes(message.poll, relevant, me),
+            };
+          });
+          if (!chatChanged) return chat;
+          anyChanged = true;
+          return { ...chat, messages };
+        });
+        return anyChanged ? { ...prev, chats } : prev;
+      });
+    },
+    [commit],
+  );
+
+  const refreshPollVotes = useCallback(
+    async (pollIds: string[]) => {
+      const ids = [...new Set(pollIds.filter(Boolean))];
+      if (ids.length === 0) return;
+      try {
+        const votes = await loadPollVotes(ids);
+        applyVotesToPolls(ids, votes);
+      } catch {
+        /* офлайн: останутся локальные значения */
+      }
+    },
+    [applyVotesToPolls],
+  );
+
+  const syncPollVotes = useCallback(
+    async (chatId: string) => {
+      const chat = stateRef.current.chats.find((item) => item.id === chatId);
+      if (!chat) return;
+      const ids = chat.messages
+        .filter((message) => message.poll)
+        .map((message) => pollIdOf(message.poll, message.remoteId ?? message.id));
+      await refreshPollVotes(ids);
+    },
+    [refreshPollVotes],
+  );
+
   const votePoll = useCallback(
     (chatId: string, messageId: string, optionId: string) => {
+      const current = stateRef.current;
+      const message = current.chats
+        .find((chat) => chat.id === chatId)
+        ?.messages.find((item) => item.id === messageId);
+      const poll = message?.poll;
+      const me = current.user?.email ?? "";
+      if (!message || !poll || !me) return;
+
+      const previous = poll.options.find((option) => option.voted)?.id ?? null;
+      const nextVoted = previous === optionId ? null : optionId;
+      const pollId = pollIdOf(poll, message.remoteId ?? message.id);
+
+      // Мгновенный отклик интерфейса; затем база подтвердит результат.
       commit((prev) => ({
         ...prev,
         chats: prev.chats.map((chat) =>
           chat.id === chatId
             ? {
                 ...chat,
-                messages: chat.messages.map((msg) => {
-                  if (msg.id !== messageId || !msg.poll) return msg;
-                  const options = msg.poll.options.map((option) => {
-                    if (option.id === optionId) {
-                      return {
-                        ...option,
-                        voted: !option.voted,
-                        votes: option.voted ? Math.max(0, option.votes - 1) : option.votes + 1,
-                      };
+                messages: chat.messages.map((item) => {
+                  if (item.id !== messageId || !item.poll) return item;
+                  const options = item.poll.options.map((option) => {
+                    let votes = option.votes;
+                    let voted = option.voted;
+                    if (option.id === previous) {
+                      votes = Math.max(0, votes - 1);
+                      voted = false;
                     }
-                    if (option.voted) {
-                      return { ...option, voted: false, votes: Math.max(0, option.votes - 1) };
+                    if (option.id === nextVoted) {
+                      votes += 1;
+                      voted = true;
                     }
-                    return option;
+                    if (option.id !== nextVoted) voted = false;
+                    return { ...option, votes, voted };
                   });
-                  return { ...msg, poll: { ...msg.poll, options } };
+                  return { ...item, poll: { ...item.poll, options } };
                 }),
               }
             : chat,
         ),
       }));
+
+      void castPollVote({ pollId, optionId, voterEmail: me })
+        .then(() => refreshPollVotes([pollId]))
+        .catch(() => refreshPollVotes([pollId]));
     },
-    [commit],
+    [commit, refreshPollVotes],
   );
+
+  // Любой голос в любом опросе обновляет счётчики у всех участников.
+  useEffect(() => {
+    if (!state.user?.email) return;
+    const pending = new Set<string>();
+    let timer: number | null = null;
+    const flush = () => {
+      const ids = [...pending];
+      pending.clear();
+      timer = null;
+      void refreshPollVotes(ids);
+    };
+    const channel = subscribePollVotes((pollId) => {
+      pending.add(pollId);
+      if (timer) window.clearTimeout(timer);
+      timer = window.setTimeout(flush, 140);
+    });
+    return () => {
+      if (timer) window.clearTimeout(timer);
+      void supabase.removeChannel(channel);
+    };
+  }, [state.user?.email, refreshPollVotes]);
 
   const openOrCreateChat = useCallback(
     (contact: {
@@ -1044,34 +1343,247 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [commit],
   );
 
+  const createGroup = useCallback(
+    (input: {
+      name: string;
+      kind: "group" | "channel";
+      avatar?: string | null;
+      description?: string;
+      members: GroupMember[];
+    }) => {
+      const current = stateRef.current.user;
+      const ownerEmail = normalizeEmail(current?.email ?? "");
+      const unique = new Map<string, GroupMember>();
+      for (const member of input.members) {
+        const email = normalizeEmail(member.email);
+        if (!email || email === ownerEmail) continue;
+        unique.set(email, { ...member, email });
+      }
+      const memberList = [...unique.values()];
+      const id = uid("g");
+      const chat: Chat = {
+        id,
+        name: stripEmoji(input.name) || (input.kind === "channel" ? "Новый канал" : "Новая группа"),
+        avatar: input.avatar ?? null,
+        unread: 0,
+        messages: [],
+        remote: memberList.length > 0,
+        historyLoaded: true,
+        group: {
+          key: uid("gk"),
+          kind: input.kind,
+          members: memberList.length + 1,
+          memberList,
+          ownerEmail,
+          description: input.description?.trim() || "",
+        },
+      };
+      commit((prev) => ({ ...prev, chats: [chat, ...prev.chats] }));
+      return id;
+    },
+    [commit],
+  );
+
+  const updateGroup = useCallback(
+    (chatId: string, patch: { name?: string; avatar?: string | null; description?: string }) => {
+      commit((prev) => ({
+        ...prev,
+        chats: prev.chats.map((chat) => {
+          if (chat.id !== chatId || !chat.group) return chat;
+          return {
+            ...chat,
+            name: patch.name !== undefined ? stripEmoji(patch.name) || chat.name : chat.name,
+            avatar: patch.avatar !== undefined ? patch.avatar : chat.avatar,
+            group: {
+              ...chat.group,
+              description:
+                patch.description !== undefined ? patch.description.trim() : chat.group.description,
+            },
+          };
+        }),
+      }));
+    },
+    [commit],
+  );
+
+  const addGroupMembers = useCallback(
+    (chatId: string, members: GroupMember[]) => {
+      const ownerEmail = normalizeEmail(stateRef.current.user?.email ?? "");
+      commit((prev) => ({
+        ...prev,
+        chats: prev.chats.map((chat) => {
+          if (chat.id !== chatId || !chat.group) return chat;
+          const list = [...(chat.group.memberList ?? [])];
+          const known = new Set(list.map((member) => normalizeEmail(member.email)));
+          for (const member of members) {
+            const email = normalizeEmail(member.email);
+            if (!email || email === ownerEmail || known.has(email)) continue;
+            known.add(email);
+            list.push({ ...member, email });
+          }
+          return {
+            ...chat,
+            remote: chat.remote || list.length > 0,
+            group: { ...chat.group, memberList: list, members: list.length + 1 },
+          };
+        }),
+      }));
+    },
+    [commit],
+  );
+
+  const removeGroupMember = useCallback(
+    (chatId: string, email: string) => {
+      const target = normalizeEmail(email);
+      commit((prev) => ({
+        ...prev,
+        chats: prev.chats.map((chat) => {
+          if (chat.id !== chatId || !chat.group) return chat;
+          const list = (chat.group.memberList ?? []).filter(
+            (member) => normalizeEmail(member.email) !== target,
+          );
+          return {
+            ...chat,
+            group: { ...chat.group, memberList: list, members: list.length + 1 },
+          };
+        }),
+      }));
+    },
+    [commit],
+  );
+
+  const openOrCreateGroup = useCallback(
+    (info: MessageGroupInfo) => {
+      const me = normalizeEmail(stateRef.current.user?.email ?? "");
+      const existing = stateRef.current.chats.find((chat) => chat.group?.key === info.key);
+      if (existing) {
+        const list = [...(existing.group?.memberList ?? [])];
+        const known = new Set(list.map((member) => normalizeEmail(member.email)));
+        for (const rawEmail of info.members) {
+          const email = normalizeEmail(rawEmail);
+          if (!email || email === me || known.has(email)) continue;
+          known.add(email);
+          list.push({ email, name: email.split("@")[0] });
+        }
+        if (
+          list.length !== (existing.group?.memberList ?? []).length ||
+          existing.name !== (info.title || existing.name) ||
+          !existing.remote
+        ) {
+          commit((prev) => ({
+            ...prev,
+            chats: prev.chats.map((chat) =>
+              chat.id === existing.id
+                ? {
+                    ...chat,
+                    name: info.title || chat.name,
+                    remote: true,
+                    group: {
+                      ...chat.group,
+                      key: info.key,
+                      kind: info.kind,
+                      ownerEmail: info.ownerEmail ?? chat.group?.ownerEmail,
+                      memberList: list,
+                      members: list.length + 1,
+                    },
+                  }
+                : chat,
+            ),
+          }));
+        }
+        return existing.id;
+      }
+
+      const memberList: GroupMember[] = [];
+      const known = new Set<string>();
+      for (const rawEmail of info.members) {
+        const email = normalizeEmail(rawEmail);
+        if (!email || email === me || known.has(email)) continue;
+        known.add(email);
+        memberList.push({ email, name: email.split("@")[0] });
+      }
+      const id = uid("g");
+      const chat: Chat = {
+        id,
+        name: info.title || (info.kind === "channel" ? "Канал" : "Группа"),
+        avatar: null,
+        unread: 0,
+        messages: [],
+        remote: true,
+        historyLoaded: true,
+        group: {
+          key: info.key,
+          kind: info.kind,
+          members: memberList.length + 1,
+          memberList,
+          ownerEmail: info.ownerEmail,
+        },
+      };
+      commit((prev) => ({ ...prev, chats: [chat, ...prev.chats] }));
+      return id;
+    },
+    [commit],
+  );
+
   /** Подгружает историю диалога из Supabase при открытии чата. */
   const loadChatHistory = useCallback(
     async (chatId: string) => {
       const chat = stateRef.current.chats.find((item) => item.id === chatId);
       const me = stateRef.current.user;
-      if (!chat?.remote || !chat.email || !me?.email) return;
+      if (!chat || !me?.email) return;
 
-      let rows: RemoteMessageRow[];
-      try {
-        rows = await loadConversation(me.email, chat.email);
-      } catch {
-        return;
-      }
       const myEmail = normalizeEmail(me.email);
-      const remoteMessages: Message[] = rows.map((row) => ({
-        id: row.id,
-        chatId,
-        fromMe: normalizeEmail(row.sender_email) === myEmail,
-        at: new Date(row.created_at).getTime(),
-        status:
-          normalizeEmail(row.sender_email) === myEmail
-            ? row.read_at
-              ? "read"
-              : "sent"
-            : undefined,
-        remoteId: row.id,
-        ...row.payload,
-      }));
+      let rows: RemoteMessageRow[];
+
+      if (chat.group?.key) {
+        const groupKey = chat.group.key;
+        const emails = (chat.group.memberList ?? [])
+          .map((member) => normalizeEmail(member.email))
+          .filter((email) => Boolean(email) && email !== myEmail);
+        if (emails.length === 0) {
+          commit((prev) => ({
+            ...prev,
+            chats: prev.chats.map((item) =>
+              item.id === chatId ? { ...item, historyLoaded: true } : item,
+            ),
+          }));
+          return;
+        }
+        const lists = await Promise.all(
+          emails.map((email) => loadConversation(myEmail, email).catch(() => [])),
+        );
+        const seen = new Set<string>();
+        rows = lists
+          .flat()
+          .filter((row) => row.payload.group?.key === groupKey)
+          .filter((row) => {
+            if (seen.has(row.id)) return false;
+            seen.add(row.id);
+            return true;
+          })
+          .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+      } else {
+        if (!chat.remote || !chat.email) return;
+        try {
+          rows = await loadConversation(myEmail, chat.email);
+        } catch {
+          return;
+        }
+      }
+
+      const remoteMessages: Message[] = rows.map((row) => {
+        const mine = normalizeEmail(row.sender_email) === myEmail;
+        return {
+          id: row.id,
+          chatId,
+          fromMe: mine,
+          at: new Date(row.created_at).getTime(),
+          status: mine ? (row.read_at ? "read" : "sent") : undefined,
+          sender: mine ? undefined : row.sender_name || row.sender_username,
+          remoteId: row.id,
+          ...row.payload,
+        };
+      });
       const remoteIds = new Set(remoteMessages.map((message) => message.id));
       const clientIds = new Set(
         rows.map((row) => row.client_id).filter((value): value is string => Boolean(value)),
@@ -1097,8 +1609,9 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           return { ...item, messages: merged, historyLoaded: true };
         }),
       }));
+      void syncPollVotes(chatId);
     },
-    [commit],
+    [commit, syncPollVotes],
   );
 
   // Realtime: входящие сообщения от других людей приходят сразу, без
@@ -1114,19 +1627,23 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           const senderEmail = normalizeEmail(decrypted.sender_email);
           if (senderEmail === email) return;
           const senderUsername = normalizeUsername(decrypted.sender_username);
-          // openOrCreateChat сам найдёт существующий чат по email/@username и
-          // при необходимости сделает его настоящим (email + remote).
-          const chatId = openOrCreateChat({
-            name: decrypted.sender_name || decrypted.sender_username || senderEmail,
-            username: senderUsername,
-            email: senderEmail,
-            avatar: decrypted.sender_avatar,
-            online: true,
-            remote: true,
-          });
+          const group = decrypted.payload.group;
+          // openOrCreateChat/openOrCreateGroup сами найдут существующий чат
+          // по email, @username или ключу группы.
+          const chatId = group
+            ? openOrCreateGroup(group)
+            : openOrCreateChat({
+                name: decrypted.sender_name || decrypted.sender_username || senderEmail,
+                username: senderUsername,
+                email: senderEmail,
+                avatar: decrypted.sender_avatar,
+                online: true,
+                remote: true,
+              });
           receiveMessage(chatId, decrypted.payload, {
             id: decrypted.id,
             at: new Date(decrypted.created_at).getTime() || Date.now(),
+            sender: decrypted.sender_name || decrypted.sender_username || senderEmail,
           });
         }).catch(() => undefined);
       },
@@ -1196,7 +1713,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [state.user?.id, openOrCreateChat, receiveMessage, commit]);
+  }, [state.user?.id, openOrCreateChat, openOrCreateGroup, receiveMessage, commit]);
 
   // При входе "догоняем" входящие, которые пришли, пока приложение было
   // закрыто: Realtime доставляет только то, что случилось при открытой
@@ -1236,20 +1753,26 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       for (const row of [...rows].reverse()) {
         const sender = normalizeEmail(row.sender_email);
         if (!sender || sender === email) continue;
-        const list = groups.get(sender) ?? [];
+        const group = row.payload.group;
+        const key = group ? `g:${group.key}` : `u:${sender}`;
+        const list = groups.get(key) ?? [];
         list.push(row);
-        groups.set(sender, list);
+        groups.set(key, list);
       }
 
-      for (const [sender, senderRows] of groups) {
+      for (const senderRows of groups.values()) {
         const last = senderRows[senderRows.length - 1];
-        const chatId = openOrCreateChat({
-          name: last.sender_name || last.sender_username || sender,
-          username: last.sender_username,
-          email: sender,
-          avatar: last.sender_avatar,
-          remote: true,
-        });
+        const group = last.payload.group;
+        const sender = normalizeEmail(last.sender_email);
+        const chatId = group
+          ? openOrCreateGroup(group)
+          : openOrCreateChat({
+              name: last.sender_name || last.sender_username || sender,
+              username: last.sender_username,
+              email: sender,
+              avatar: last.sender_avatar,
+              remote: true,
+            });
 
         commit((prev) => ({
           ...prev,
@@ -1268,6 +1791,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
                 fromMe: false,
                 at: new Date(row.created_at).getTime(),
                 remoteId: row.id,
+                sender: row.sender_name || row.sender_username || normalizeEmail(row.sender_email),
                 fresh: activeChatRef.current !== chatId,
                 ...row.payload,
               }));
@@ -1300,7 +1824,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (retryTimer) window.clearTimeout(retryTimer);
       window.removeEventListener("online", onOnline);
     };
-  }, [state.user?.email, openOrCreateChat, commit]);
+  }, [state.user?.email, openOrCreateChat, openOrCreateGroup, commit]);
 
   const addCall = useCallback(
     (call: Omit<CallRecord, "id" | "at">) => {
@@ -1313,23 +1837,74 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   );
 
   const clearMessages = useCallback(
-    (chatId: string) => {
+    async (chatId: string) => {
+      const current = stateRef.current;
+      const chat = current.chats.find((item) => item.id === chatId);
+      const me = current.user?.email ?? "";
+      if (!chat) return false;
+
+      const remoteIds = chat.messages
+        .map((message) => message.remoteId)
+        .filter((value): value is string => Boolean(value));
+      const ownClientIds = chat.messages
+        .filter((message) => message.fromMe)
+        .map((message) => message.id);
+
+      // Сначала чистим интерфейс — история исчезает мгновенно.
       commit((prev) => ({
         ...prev,
-        chats: prev.chats.map((c) =>
-          c.id === chatId ? { ...c, messages: [], unread: 0 } : c,
+        chats: prev.chats.map((item) =>
+          item.id === chatId ? { ...item, messages: [], unread: 0 } : item,
         ),
       }));
+
+      if (!chat.remote || !me) return true;
+      try {
+        if (chat.group) {
+          await Promise.all([
+            deleteRemoteMessagesByIds(remoteIds),
+            deleteOwnMessagesByClientIds(me, ownClientIds),
+          ]);
+        } else if (chat.email) {
+          await deleteConversation(me, chat.email);
+        }
+        return true;
+      } catch {
+        return false;
+      }
     },
     [commit],
   );
 
   const loginExisting = useCallback(
-    (email: string) => {
-      const key = accountKey(email);
-      const account = stateRef.current.accounts[key] ?? null;
+    (
+      email: string,
+      profile?: (ZeroProfile & { createdAt?: number }) | null,
+    ) => {
+      const key = accountKey(profile?.email || email);
+      if (!key) return null;
+
+      // Локальная копия приоритетнее: в ней могут быть свежие правки профиля.
+      const account =
+        stateRef.current.accounts[key] ??
+        (profile ? userFromProfile({ ...profile, email: key }) : null);
       if (!account) return null;
-      commit((prev) => ({ ...prev, user: account, onboarded: true }));
+
+      commit((prev) => {
+        if (
+          prev.onboarded &&
+          prev.user?.id === account.id &&
+          prev.user?.email === account.email
+        ) {
+          return prev;
+        }
+        return {
+          ...prev,
+          user: account,
+          onboarded: true,
+          accounts: { ...prev.accounts, [key]: account },
+        };
+      });
       return account;
     },
     [commit],
@@ -1345,6 +1920,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       status?: string;
     }) => {
       const key = accountKey(input.email);
+      // Если аккаунт уже появился (повторный клик, восстановление сессии),
+      // не создаём второй профиль с тем же email — просто входим.
+      const existing = stateRef.current.accounts[key];
+      if (existing) {
+        commit((prev) => ({ ...prev, user: existing, onboarded: true }));
+        return;
+      }
       const user: User = {
         id: uid("u"),
         name: stripEmoji(input.name) || "Пользователь",
@@ -1452,7 +2034,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       editMessage,
       pinMessage,
       votePoll,
+      syncPollVotes,
       openOrCreateChat,
+      createGroup,
+      updateGroup,
+      addGroupMembers,
+      removeGroupMember,
       addCall,
       clearMessages,
       blockChat,
@@ -1486,7 +2073,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     editMessage,
     pinMessage,
     votePoll,
+    syncPollVotes,
     openOrCreateChat,
+    createGroup,
+    updateGroup,
+    addGroupMembers,
+    removeGroupMember,
     addCall,
     clearMessages,
     blockChat,

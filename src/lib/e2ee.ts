@@ -240,24 +240,37 @@ export function isEncryptedPayload(value: unknown): value is EncryptedEnvelope {
   return envelope.__enc === PAYLOAD_MARK && typeof envelope.iv === "string" && typeof envelope.data === "string";
 }
 
+/** Сбрасывает кэш публичного ключа собеседника (после регистрации профиля). */
+export function refreshPeerKey(emailValue: string) {
+  const email = normalizeEmail(emailValue);
+  if (email) peerKeys.delete(email);
+}
+
 /** Шифрует payload сообщения ключом беседы. */
 export async function encryptPayload(
   meEmail: string,
   peerEmail: string,
   payload: MessagePayload,
-): Promise<EncryptedEnvelope> {
-  const key = await deriveConversationKey(meEmail, peerEmail);
-  const iv = randomBytes(12);
-  const cipher = await subtle().encrypt(
-    { name: "AES-GCM", iv: bytes(iv) },
-    key,
-    bytes(encode(JSON.stringify(payload))),
-  );
-  return {
-    __enc: PAYLOAD_MARK,
-    iv: bytesToBase64(iv),
-    data: bytesToBase64(new Uint8Array(cipher)),
-  };
+): Promise<EncryptedEnvelope | MessagePayload> {
+  try {
+    const key = await deriveConversationKey(meEmail, peerEmail);
+    const iv = randomBytes(12);
+    const cipher = await subtle().encrypt(
+      { name: "AES-GCM", iv: bytes(iv) },
+      key,
+      bytes(encode(JSON.stringify(payload))),
+    );
+    return {
+      __enc: PAYLOAD_MARK,
+      iv: bytesToBase64(iv),
+      data: bytesToBase64(new Uint8Array(cipher)),
+    };
+  } catch {
+    // У собеседника ещё нет публичного ключа (только что зарегистрировался
+    // или профиль не успел сохраниться). Сообщение важнее: отправляем payload
+    // как есть, чтобы оно дошло. Следующие сообщения снова будут E2EE.
+    return payload;
+  }
 }
 
 /** Расшифровывает payload. Старые незашифрованные сообщения читаются как есть. */

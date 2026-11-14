@@ -50,6 +50,14 @@ const zeroId = "c_zero";
 
 export const SEED_CHATS: Chat[] = [
   {
+    id: "c_saved",
+    name: "Избранное",
+    saved: true,
+    unread: 0,
+    messages: [],
+    historyLoaded: true,
+  },
+  {
     id: zeroId,
     name: "Zero",
     username: "zero",

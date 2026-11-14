@@ -12,11 +12,13 @@ export function PresenceDot({
     <span
       aria-hidden
       className={cn(
-        "pointer-events-none absolute -right-0.5 -bottom-0.5 z-20 size-3.5 rounded-full border-[2.5px] border-background",
-        online ? "bg-online" : "bg-foreground/25",
+        "presence-dot pointer-events-none absolute -right-0.5 -bottom-0.5 z-20 grid size-[15px] place-items-center rounded-full border-[2.5px] border-background",
+        online ? "bg-online" : "bg-faint",
         className,
       )}
-    />
+    >
+      {online ? <span className="presence-pulse absolute inset-0 rounded-full" /> : null}
+    </span>
   );
 }
 

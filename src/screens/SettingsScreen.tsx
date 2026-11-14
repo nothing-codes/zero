@@ -5,15 +5,20 @@ import {
   Check,
   ChevronRight,
   Info,
+  Laptop,
+  Loader2,
   Lock,
   LogOut,
+  Monitor,
   Moon,
   Palette,
+  RefreshCw,
   Smartphone,
   Sun,
+  Tablet,
   Type,
 } from "lucide-react";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Avatar } from "../components/Avatar";
 import {
   Button,
@@ -24,6 +29,14 @@ import {
   Sheet,
   Switch,
 } from "../components/ui";
+import {
+  currentDeviceInfo,
+  isCurrentDevice,
+  listDevices,
+  terminateDevice,
+  terminateOtherDevices,
+  type DeviceRow,
+} from "../lib/devices";
 import { requestPushPermission } from "../lib/feedback";
 import { useAuthedStore } from "../lib/store";
 import type { Settings, ThemeMode, Visibility } from "../types";
@@ -43,7 +56,28 @@ const THEME_LABEL: Record<ThemeMode, string> = {
   system: "Системная",
 };
 
-type Sub = null | "notifications" | "appearance" | "privacy" | "about";
+type Sub = null | "notifications" | "appearance" | "privacy" | "devices" | "about";
+
+function deviceActivity(iso: string) {
+  const at = new Date(iso).getTime();
+  if (!Number.isFinite(at)) return "";
+  const minutes = Math.max(0, Math.round((Date.now() - at) / 60_000));
+  if (minutes < 2) return "в сети";
+  if (minutes < 60) return `${minutes} мин назад`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} ч назад`;
+  const days = Math.round(hours / 24);
+  if (days === 1) return "вчера";
+  if (days < 7) return `${days} дн назад`;
+  return new Date(at).toLocaleDateString("ru-RU", { day: "numeric", month: "short" });
+}
+
+function DeviceIcon({ platform }: { platform: string }) {
+  if (/iPhone|Android|Phone/i.test(platform)) return <Smartphone size={15} />;
+  if (/iPad|Tablet/i.test(platform)) return <Tablet size={15} />;
+  if (/macOS|Windows|Linux/i.test(platform)) return <Laptop size={15} />;
+  return <Monitor size={15} />;
+}
 
 function SubShell({ title, onBack, children }: { title: string; onBack: () => void; children: ReactNode }) {
   return (
@@ -62,6 +96,136 @@ function Card({ children, className }: { children: ReactNode; className?: string
     <div className={cn("rounded-[18px] border border-foreground/8 bg-foreground/[0.025] px-4", className)}>
       {children}
     </div>
+  );
+}
+
+function RowValue({ text }: { text: string }) {
+  return (
+    <span className="flex shrink-0 items-center gap-1.5">
+      <span className="t-sub text-faint">{text}</span>
+      <ChevronRight size={17} className="text-faint" />
+    </span>
+  );
+}
+
+function DevicesPanel({ email, onNotice }: { email: string; onNotice: (text: string) => void }) {
+  const [rows, setRows] = useState<DeviceRow[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const local = currentDeviceInfo();
+
+  const reload = useCallback(async () => {
+    try {
+      setRows(await listDevices(email));
+    } catch {
+      setRows([]);
+    }
+  }, [email]);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const remove = async (row: DeviceRow) => {
+    setBusy(true);
+    try {
+      await terminateDevice(row.id);
+      await reload();
+      onNotice("Сеанс завершён");
+      haptic(6);
+    } catch {
+      onNotice("Не удалось завершить сеанс");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeOthers = async () => {
+    setBusy(true);
+    try {
+      await terminateOtherDevices(email);
+      await reload();
+      onNotice("Все другие сеансы завершены");
+      haptic(6);
+    } catch {
+      onNotice("Не удалось завершить сеансы");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const current = rows?.find(isCurrentDevice);
+  const others = (rows ?? []).filter((row) => !isCurrentDevice(row));
+
+  return (
+    <>
+      <SectionLabel className="pt-3">Текущий сеанс</SectionLabel>
+      <Card>
+        <SettingsRow
+          icon={<Smartphone size={15} />}
+          label={current?.name || local.name}
+          hint={current ? `${current.platform} · ${deviceActivity(current.last_active)}` : local.platform}
+          trailing={<span className="t-cap shrink-0 rounded-full bg-accent/15 px-2.5 py-1 text-accent">Это устройство</span>}
+          last
+        />
+      </Card>
+
+      <SectionLabel>Активные сеансы</SectionLabel>
+      {rows === null ? (
+        <Card>
+          <div className="flex items-center justify-center gap-2 py-6 text-faint">
+            <Loader2 size={16} className="animate-spin" />
+            <span className="t-sub">Загрузка…</span>
+          </div>
+        </Card>
+      ) : others.length === 0 ? (
+        <Card>
+          <div className="py-6 text-center">
+            <p className="t-sub text-faint">Других активных сеансов нет</p>
+          </div>
+        </Card>
+      ) : (
+        <Card>
+          {others.map((row, index) => (
+            <SettingsRow
+              key={row.id}
+              icon={<DeviceIcon platform={row.platform} />}
+              label={row.name}
+              hint={`${row.platform} · ${deviceActivity(row.last_active)}`}
+              last={index === others.length - 1}
+              trailing={
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void remove(row)}
+                  className="press t-sub shrink-0 rounded-full border border-danger/30 px-3 py-1.5 font-medium text-danger disabled:opacity-40"
+                >
+                  Завершить
+                </button>
+              }
+            />
+          ))}
+        </Card>
+      )}
+
+      {others.length > 0 ? (
+        <div className="mt-4">
+          <Card>
+            <SettingsRow
+              icon={<LogOut size={15} />}
+              label="Завершить все другие сеансы"
+              danger
+              onClick={busy ? undefined : () => void removeOthers()}
+              last
+              trailing={<span />}
+            />
+          </Card>
+        </div>
+      ) : null}
+
+      <p className="t-sub mt-5 px-1 text-faint">
+        Завершённые сеансы выйдут из аккаунта, но история сообщений останется на этом устройстве.
+      </p>
+    </>
   );
 }
 
@@ -103,10 +267,7 @@ export function SettingsScreen({ onOpenProfile }: { onOpenProfile: () => void })
                 <button type="button" onClick={onOpenProfile} className="press mt-4 flex w-full items-center gap-3 rounded-[18px] border border-foreground/10 bg-card p-4 text-left shadow-[0_18px_40px_-30px_rgba(0,0,0,0.9)]">
                   <Avatar name={user.name} src={user.avatar} size={56} gradient />
                   <span className="min-w-0 flex-1">
-                    <span className="flex items-center gap-1.5">
-                      <span className="t-body truncate font-semibold">{user.name}</span>
-                    </span>
-                    <span className="t-sub mt-0.5 block truncate text-faint">@{user.username}</span>
+                    <span className="t-body block truncate font-semibold">{user.name}</span>
                   </span>
                   <ChevronRight size={18} className="text-faint" />
                 </button>
@@ -114,12 +275,13 @@ export function SettingsScreen({ onOpenProfile }: { onOpenProfile: () => void })
                 <SectionLabel>Основное</SectionLabel>
                 <Card>
                   <SettingsRow icon={<Bell size={15} />} label="Уведомления" onClick={() => setSub("notifications")} />
-                  <SettingsRow icon={<Palette size={15} />} label="Внешний вид" hint={THEME_LABEL[settings.theme]} onClick={() => setSub("appearance")} />
-                  <SettingsRow icon={<Lock size={15} />} label="Приватность" hint={`Почта: ${valueLabel(settings.phoneNumber).toLowerCase()}`} onClick={() => setSub("privacy")} last />
+                  <SettingsRow icon={<Palette size={15} />} label="Внешний вид" onClick={() => setSub("appearance")} />
+                  <SettingsRow icon={<Lock size={15} />} label="Приватность" onClick={() => setSub("privacy")} last />
                 </Card>
 
                 <SectionLabel>Zero</SectionLabel>
                 <Card>
+                  <SettingsRow icon={<Smartphone size={15} />} label="Устройства" onClick={() => setSub("devices")} />
                   <SettingsRow icon={<Info size={15} />} label="О приложении" hint="Версия 0.1.0" onClick={() => setSub("about")} last />
                 </Card>
 
@@ -138,7 +300,6 @@ export function SettingsScreen({ onOpenProfile }: { onOpenProfile: () => void })
                 <Card className="mt-3">
                   <SettingsRow
                     label="Push-уведомления"
-                    hint="Только на это устройство"
                     trailing={
                       <Switch label="Push" checked={settings.push} onChange={async (v) => {
                         if (!v) return set({ push: false });
@@ -165,7 +326,6 @@ export function SettingsScreen({ onOpenProfile }: { onOpenProfile: () => void })
                   <SettingsRow
                     icon={<Moon size={15} />}
                     label="Уменьшить движение"
-                    hint="Меньше анимаций в интерфейсе"
                     trailing={<Switch label="Уменьшить движение" checked={settings.reducedMotion} onChange={(v) => set({ reducedMotion: v })} />}
                     last
                   />
@@ -175,11 +335,11 @@ export function SettingsScreen({ onOpenProfile }: { onOpenProfile: () => void })
               <SubShell title="Приватность" onBack={() => setSub(null)}>
                 <SectionLabel className="pt-3">Кто видит</SectionLabel>
                 <Card>
-                  <SettingsRow label="Последний визит" hint={valueLabel(settings.lastSeen)} onClick={() => setChoice("lastSeen")} />
-                  <SettingsRow label="Фото профиля" hint={valueLabel(settings.profilePhoto)} onClick={() => setChoice("profilePhoto")} />
+                  <SettingsRow label="Последний визит" trailing={<RowValue text={valueLabel(settings.lastSeen)} />} onClick={() => setChoice("lastSeen")} />
+                  <SettingsRow label="Фото профиля" trailing={<RowValue text={valueLabel(settings.profilePhoto)} />} onClick={() => setChoice("profilePhoto")} />
                   <SettingsRow
                     label="Кому показывать почту"
-                    hint={valueLabel(settings.phoneNumber)}
+                    trailing={<RowValue text={valueLabel(settings.phoneNumber)} />}
                     onClick={() => setChoice("phoneNumber")}
                     last
                   />
@@ -188,11 +348,14 @@ export function SettingsScreen({ onOpenProfile }: { onOpenProfile: () => void })
                 <Card>
                   <SettingsRow
                     label="Отчёты о прочтении"
-                    hint="Галочки у ваших сообщений"
                     trailing={<Switch label="Отчёты о прочтении" checked={settings.readReceipts} onChange={(v) => set({ readReceipts: v })} />}
                     last
                   />
                 </Card>
+              </SubShell>
+            ) : sub === "devices" ? (
+              <SubShell title="Устройства" onBack={() => setSub(null)}>
+                <DevicesPanel email={user.email} onNotice={notify} />
               </SubShell>
             ) : (
               <SubShell title="О приложении" onBack={() => setSub(null)}>

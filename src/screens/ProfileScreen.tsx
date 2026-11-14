@@ -2,6 +2,7 @@ import { motion } from "motion/react";
 import { ArrowLeft, CalendarDays, Camera, Check, ChevronRight, Lock, Mail, MessageCircle, Pencil, Share2 } from "lucide-react";
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 import { Avatar } from "../components/Avatar";
+import { PinnedMusicPlayer } from "../components/Music";
 import { PhotoEditor, type PhotoEditorMode } from "../components/PhotoEditor";
 import { Button, IconButton, Sheet } from "../components/ui";
 import { shareText } from "../lib/image";
@@ -138,6 +139,18 @@ export function ProfileScreen({ onBack, onOpenSettings }: { onBack: () => void; 
             </div>
           ))}
         </div>
+
+        {user.pinnedMusic ? (
+          <div className="mt-3">
+            <PinnedMusicPlayer
+              track={user.pinnedMusic}
+              onRemove={() => {
+                haptic(6);
+                updateProfile({ pinnedMusic: null });
+              }}
+            />
+          </div>
+        ) : null}
 
         {user.bio.trim() ? (
           <div className="mt-3 rounded-[18px] border border-foreground/8 bg-foreground/[0.025] p-4 text-left">

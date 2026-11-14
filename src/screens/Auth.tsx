@@ -1,10 +1,18 @@
 import { AnimatePresence, motion, useAnimation } from "motion/react";
 import { ArrowLeft, Camera, Check } from "lucide-react";
-import { useEffect, useRef, useState, type ClipboardEvent, type ChangeEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ClipboardEvent,
+  type ChangeEvent,
+} from "react";
 import { Avatar } from "../components/Avatar";
 import { ContactGlobe } from "../components/Globe";
 import { PhotoEditor } from "../components/PhotoEditor";
 import { Button, IconButton, Sheet } from "../components/ui";
+import { findRemoteAccount, isUsernameTaken } from "../lib/chat";
 import { playTone } from "../lib/feedback";
 import { useStore } from "../lib/store";
 import { supabase } from "../lib/supabase";
@@ -342,7 +350,7 @@ function SignupStep({
     username: string;
     bio: string;
     avatar: string | null;
-  }) => void;
+  }) => Promise<string | null>;
 }) {
   const [name, setName] = useState("");
   const [username, setUsername] = useState("");
@@ -351,6 +359,7 @@ function SignupStep({
   const [editorFile, setEditorFile] = useState<File | null>(null);
   const [touchedUsername, setTouchedUsername] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -446,22 +455,40 @@ function SignupStep({
       </div>
 
       <div className="px-6 pb-[max(22px,env(safe-area-inset-bottom,0px))] pt-3">
+        <AnimatePresence>
+          {error ? (
+            <motion.p
+              initial={{ opacity: 0, y: 4 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0 }}
+              className="t-sub mb-3 text-center text-danger"
+            >
+              {error}
+            </motion.p>
+          ) : null}
+        </AnimatePresence>
         <Button
           className="w-full"
           disabled={!valid || loading}
           onClick={() => {
-            if (!valid) return;
+            if (!valid || loading) return;
             setLoading(true);
+            setError(null);
             haptic(8);
-            onDone({
+            void onDone({
               name: name.trim(),
               username: username.trim() || "user",
               bio,
               avatar,
+            }).then((message) => {
+              if (message) {
+                setError(message);
+                setLoading(false);
+              }
             });
           }}
         >
-          Начать
+          {loading ? "Создаём аккаунт…" : "Начать"}
         </Button>
       </div>
 
@@ -488,6 +515,8 @@ export function AuthFlow() {
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [cooldownUntil, setCooldownUntil] = useState(0);
+  const [checking, setChecking] = useState(false);
+  const [lookupError, setLookupError] = useState<string | null>(null);
   const sendingRef = useRef(false);
   const lastSentEmailRef = useRef("");
   const COOLDOWN_MS = 60_000;
@@ -495,6 +524,55 @@ export function AuthFlow() {
   useEffect(() => {
     setOnboarded();
   }, [setOnboarded]);
+
+  const address = normalizeEmail(email);
+
+  /**
+   * Главное правило входа: сначала ищем аккаунт локально, затем в
+   * `zero_profiles` / `zero_states`. Существующий аккаунт входит сразу,
+   * регистрация открывается только для действительно нового email.
+   */
+  const resolveAccount = useCallback(
+    async (target: string) => {
+      const key = normalizeEmail(target);
+      if (!key) return;
+      setLookupError(null);
+      if (loginExisting(key)) return;
+
+      setChecking(true);
+      try {
+        let remote: Awaited<ReturnType<typeof findRemoteAccount>> = null;
+        let lastError: unknown = null;
+        // Одна повторная попытка на случай краткого обрыва сети.
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            remote = await findRemoteAccount(key);
+            lastError = null;
+            break;
+          } catch (error) {
+            lastError = error;
+            if (attempt === 0) {
+              await new Promise((resolve) => window.setTimeout(resolve, 500));
+            }
+          }
+        }
+        if (lastError) throw lastError;
+
+        if (remote) {
+          loginExisting(key, remote);
+          return;
+        }
+        setStep("signup");
+      } catch {
+        setLookupError(
+          "Не удалось проверить аккаунт. Проверьте подключение и попробуйте ещё раз.",
+        );
+      } finally {
+        setChecking(false);
+      }
+    },
+    [loginExisting],
+  );
 
   // Поддержка magic link: если Supabase вернул сессию по ссылке из письма,
   // входим по email без ручного ввода кода.
@@ -510,14 +588,12 @@ export function AuthFlow() {
         if (!sessionEmail) return;
         const next = normalizeEmail(sessionEmail);
         setEmail(next);
-        if (!loginExisting(next)) setStep("signup");
+        await resolveAccount(next);
       } catch {
         /* нет сессии — обычный вход по коду */
       }
     })();
-  }, [loginExisting]);
-
-  const address = normalizeEmail(email);
+  }, [resolveAccount]);
 
   // Подтверждение идёт через Supabase Auth (email OTP).
   const sendCode = async () => {
@@ -572,8 +648,7 @@ export function AuthFlow() {
   };
 
   const finishOtp = () => {
-    const existing = loginExisting(address);
-    if (!existing) setStep("signup");
+    void resolveAccount(address);
   };
 
   return (
@@ -625,7 +700,16 @@ export function AuthFlow() {
             <SignupStep
               email={address}
               onBack={() => setStep("email")}
-              onDone={({ name, username, bio, avatar }) => {
+              onDone={async ({ name, username, bio, avatar }) => {
+                // @username — публичный ключ поиска, поэтому занятый
+                // обрабатываем до создания профиля.
+                try {
+                  if (await isUsernameTaken(username, address)) {
+                    return "Этот @username уже занят";
+                  }
+                } catch {
+                  return "Не удалось проверить @username. Попробуйте ещё раз.";
+                }
                 completeSignup({
                   email: address,
                   name,
@@ -634,11 +718,58 @@ export function AuthFlow() {
                   bio,
                 });
                 playTone("success");
+                return null;
               }}
             />
           </motion.div>
         )}
       </AnimatePresence>
+
+      <AnimatePresence>
+        {checking ? (
+          <motion.div
+            key="checking"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            className="pointer-events-none absolute inset-x-0 bottom-[max(30px,env(safe-area-inset-bottom,0px))] z-30 flex justify-center"
+          >
+            <div className="flex items-center gap-2 rounded-full bg-foreground/[0.08] px-4 py-2 backdrop-blur-md">
+              <span className="size-3.5 animate-spin rounded-full border-2 border-foreground/25 border-t-foreground" />
+              <span className="t-sub text-muted-foreground">Проверяем аккаунт…</span>
+            </div>
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
+
+      {lookupError ? (
+        <div className="absolute inset-0 z-40 grid place-items-center bg-background/95 px-6 backdrop-blur-sm">
+          <div className="w-full max-w-sm text-center">
+            <p className="t-body text-danger">{lookupError}</p>
+            <div className="mt-5 flex gap-2">
+              <Button
+                variant="secondary"
+                className="flex-1"
+                onClick={() => {
+                  setLookupError(null);
+                  setStep("email");
+                }}
+              >
+                Изменить почту
+              </Button>
+              <Button
+                className="flex-1"
+                onClick={() => {
+                  setLookupError(null);
+                  void resolveAccount(address);
+                }}
+              >
+                Повторить
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

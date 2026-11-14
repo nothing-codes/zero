@@ -199,6 +199,13 @@ export function App() {
     openOverlay({ type: "chat", chatId });
   };
 
+  // Переход между чатами без добавления записи в историю: «Назад» всё равно
+  // вернёт в список чатов.
+  const switchChat = useCallback((chatId: string) => {
+    haptic(4);
+    setOverlay({ type: "chat", chatId });
+  }, []);
+
   if (!user) {
     return (
       <Frame>
@@ -260,6 +267,7 @@ export function App() {
                 chatId={overlay.chatId}
                 onBack={closeOverlay}
                 onCall={() => openCall(overlay.chatId)}
+                onOpenChat={switchChat}
               />
             ) : (
               <ProfileScreen

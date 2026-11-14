@@ -16,6 +16,15 @@ export interface Settings {
   compact: boolean;
 }
 
+export interface PinnedMusic {
+  title: string;
+  artist: string;
+  src: string;
+  enc?: MediaEncryption;
+  mime: string;
+  size: number;
+}
+
 export interface User {
   id: string;
   name: string;
@@ -28,6 +37,10 @@ export interface User {
   status: string;
   avatar: string | null;
   banner?: string | null;
+  /** Музыка, закреплённая в профиле. */
+  pinnedMusic?: PinnedMusic | null;
+  /** Личные стикеры (сжатые картинки), сохранённые из чата. */
+  stickers?: string[];
   createdAt: number;
 }
 
@@ -57,6 +70,8 @@ export interface PollOption {
 }
 
 export interface Poll {
+  /** Стабильный id для голосования в базе (одинаковый у всех участников). */
+  id?: string;
   question: string;
   options: PollOption[];
 }
@@ -129,6 +144,8 @@ export interface Message {
   edited?: boolean;
   sender?: string;
   reactions?: Reaction[];
+  /** Группа/канал, к которому относится сообщение (для маршрутизации). */
+  group?: MessageGroupInfo;
   /** Идентификатор сообщения в базе Zero (для дедупликации Realtime). */
   remoteId?: string;
 }
@@ -147,10 +164,32 @@ export interface MessagePayload {
   replyTo?: string;
   forwardedFrom?: string;
   edited?: boolean;
+  /** Описание группы/канала — едет внутри зашифрованного payload. */
+  group?: MessageGroupInfo;
+}
+
+export interface MessageGroupInfo {
+  key: string;
+  title: string;
+  kind: "group" | "channel";
+  members: string[];
+  ownerEmail?: string;
+}
+
+export interface GroupMember {
+  email: string;
+  name: string;
+  username?: string;
+  avatar?: string | null;
 }
 
 export interface ChatGroup {
+  key?: string;
+  kind?: "group" | "channel";
   members?: number;
+  memberList?: GroupMember[];
+  ownerEmail?: string;
+  description?: string;
 }
 
 export interface Chat {
@@ -170,6 +209,8 @@ export interface Chat {
   pinnedChat?: boolean;
   muted?: boolean;
   group?: ChatGroup;
+  /** Чат «Избранное» — личные заметки. */
+  saved?: boolean;
   /** Чат с реальным пользователем, сообщения хранятся в Supabase. */
   remote?: boolean;
   /** История из Supabase уже подгружена. */
