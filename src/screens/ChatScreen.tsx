@@ -3,7 +3,7 @@ import {
   ArrowDown, ArrowLeft, BadgeCheck, Ban, BarChart3, Camera, Check, CheckCheck, ChevronDown, Clock3, Copy, Eraser, File as FileIcon, Forward, Image as ImageIcon, Mail, Mic, MoreVertical, Paperclip, Pause, Phone, Pin, Play, Plus, Reply, Search, Send, Trash2, Video, X,
 } from "lucide-react";
 import {
-  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject,
+  Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject,
 } from "react";
 import { Avatar } from "../components/Avatar";
 import { ContactPicker } from "../components/ContactPicker";
@@ -38,6 +38,29 @@ function Ticks({ status, mine }: { status?: MessageStatus; mine: boolean }) {
   if (status === "sending") return <Clock3 size={11} className={className} />;
   if (status === "sent") return <Check size={12} className={className} />;
   return <CheckCheck size={13} className={className} />;
+}
+
+function unreadStartId(messages: Message[], unread: number) {
+  const fresh = messages.find((message) => message.fresh && !message.fromMe);
+  if (fresh) return fresh.id;
+  if (unread <= 0) return null;
+  let remaining = unread;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].fromMe) continue;
+    remaining -= 1;
+    if (remaining <= 0) return messages[index].id;
+  }
+  return null;
+}
+
+function UnreadDivider() {
+  return (
+    <div role="separator" aria-label="Непрочитанные сообщения" className="my-4 flex items-center gap-3">
+      <span className="h-px flex-1 bg-foreground/12" />
+      <span className="t-cap text-foreground/55">Непрочитанные сообщения</span>
+      <span className="h-px flex-1 bg-foreground/12" />
+    </div>
+  );
 }
 
 function Meta({ message, mine }: { message: Message; mine: boolean }) {
@@ -282,9 +305,9 @@ function PollBubble({ message, mine, onVote }: { message: Message; mine: boolean
 }
 
 function MessageBubble({
-  message, chat, prev, next, replyMessage, activeMatch, flash, onMenu, onScrollTo, searchDimmed, onVote,
+  message, chat, prev, next, replyMessage, activeMatch, flash, onMenu, onScrollTo, searchDimmed, onVote, onMediaLoad,
 }: {
-  message: Message; chat: Chat; prev?: Message; next?: Message; replyMessage?: Message; activeMatch: boolean; flash: boolean; onMenu: (m: Message, x: number, y: number) => void; onScrollTo: (id: string) => void; searchDimmed: boolean; onVote: (id: string) => void;
+  message: Message; chat: Chat; prev?: Message; next?: Message; replyMessage?: Message; activeMatch: boolean; flash: boolean; onMenu: (m: Message, x: number, y: number) => void; onScrollTo: (id: string) => void; searchDimmed: boolean; onVote: (id: string) => void; onMediaLoad: () => void;
 }) {
   const mine = message.fromMe;
   const isGroup = Boolean(chat.group);
@@ -331,7 +354,7 @@ function MessageBubble({
     );
     if (message.kind === "photo") return (
       <div className={cn("max-w-[286px] overflow-hidden p-1.5", bubbleRadius, bubbleTone)}>
-        <div className="block w-full overflow-hidden rounded-[14px]">{message.photo?.src ? <img src={message.photo.src} alt="" draggable={false} className="max-h-[340px] w-full object-cover" /> : <PhotoArt seed={message.photo?.seed ?? 1} wide={message.photo?.wide} className="aspect-[4/5] w-full" />}</div>
+        <div className="block w-full overflow-hidden rounded-[14px]">{message.photo?.src ? <img src={message.photo.src} alt="" draggable={false} onLoad={onMediaLoad} className="max-h-[340px] w-full object-cover" /> : <PhotoArt seed={message.photo?.seed ?? 1} wide={message.photo?.wide} className="aspect-[4/5] w-full" />}</div>
         {message.photo?.caption ? <p className="bubble-text px-1.5 pb-0.5 pt-2 text-[14px] leading-snug">{message.photo.caption}</p> : null}
         <div className="px-1.5"><Meta message={message} mine={mine} /></div>
       </div>
@@ -469,6 +492,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   const { sendMessage, setMessageMediaSource, deleteMessage, pinMessage, votePoll, forwardMessage, setDraft, markRead, setActiveChat, openOrCreateChat, clearMessages, loadChatHistory } = useAuthedStore();
   const messages = chat.messages;
   const [text, setText] = useState(chat.draft ?? "");
+  const [unreadFromId] = useState<string | null>(() => unreadStartId(chat.messages, chat.unread));
   const [replyTo, setReplyTo] = useState<Message | null>(null);
   const [attachOpen, setAttachOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -506,6 +530,8 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   const videoPreviewRef = useRef<HTMLVideoElement>(null);
   const atBottom = useRef(true);
   const prevCount = useRef(messages.length);
+  const scrollRaf = useRef<number | null>(null);
+  const scrollActive = useRef(false);
   const noticeTimer = useRef<number | null>(null);
   const recRef = useRef<{ kind: "voice" | "videoNote"; startedAt: number } | null>(null);
   const recCancel = useRef(false);
@@ -532,19 +558,67 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
   }, []);
 
   const byId = useMemo(() => new Map(messages.map((m) => [m.id, m])), [messages]);
+  const messageIndex = useMemo(() => new Map(messages.map((m, index) => [m.id, index])), [messages]);
   const pinned = useMemo(() => messages.find((m) => m.pinned), [messages]);
   const replyMessage = replyTo ? byId.get(replyTo.id) : undefined;
   const query = searchQuery.trim().toLowerCase();
   const matches = useMemo(() => (query ? messages.filter((m) => searchText(m).includes(query)) : []), [messages, query]);
   const activeMatchId = matches.length > 0 ? matches[Math.min(searchIndex, matches.length - 1)]?.id : null;
 
+  const cancelScroll = useCallback(() => {
+    if (scrollRaf.current !== null) {
+      window.cancelAnimationFrame(scrollRaf.current);
+      scrollRaf.current = null;
+    }
+    scrollActive.current = false;
+  }, []);
+
   const scrollToBottom = useCallback((smooth = true) => {
     const node = scrollRef.current;
     if (!node) return;
-    if (smooth) node.scrollTo({ top: node.scrollHeight, behavior: "smooth" });
-    else node.scrollTop = node.scrollHeight;
+    cancelScroll();
     atBottom.current = true;
     setShowJump(false);
+
+    const target = () => Math.max(0, node.scrollHeight - node.clientHeight);
+    const reduced =
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ||
+      document.documentElement.classList.contains("reduce-motion");
+    const distance = target() - node.scrollTop;
+
+    if (!smooth || reduced || distance <= 0) {
+      node.scrollTop = target();
+      return;
+    }
+
+    const start = node.scrollTop;
+    const duration = Math.min(460, Math.max(200, distance * 0.55));
+    const startedAt = performance.now();
+    scrollActive.current = true;
+
+    const step = (now: number) => {
+      const nextTarget = target();
+      const progress = Math.min(1, (now - startedAt) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      node.scrollTop = start + (nextTarget - start) * eased;
+      if (progress < 1) {
+        scrollRaf.current = window.requestAnimationFrame(step);
+        return;
+      }
+      node.scrollTop = target();
+      scrollRaf.current = null;
+      scrollActive.current = false;
+      atBottom.current = true;
+      setShowJump(false);
+    };
+
+    scrollRaf.current = window.requestAnimationFrame(step);
+  }, [cancelScroll]);
+
+  const keepBottomOnMedia = useCallback(() => {
+    const node = scrollRef.current;
+    if (!node || !atBottom.current || scrollActive.current) return;
+    node.scrollTop = node.scrollHeight - node.clientHeight;
   }, []);
 
   useLayoutEffect(() => { const node = scrollRef.current; if (node) node.scrollTop = node.scrollHeight; }, [chat.id]);
@@ -558,12 +632,49 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     prevCount.current = count;
     if (delta <= 0) return;
     const last = messages[count - 1];
-    if (atBottom.current || last?.fromMe) window.setTimeout(() => scrollToBottom(), 60);
-    else if (last && !last.fromMe) setShowJump(true);
+    if (atBottom.current || last?.fromMe) {
+      const frame = window.requestAnimationFrame(() => scrollToBottom());
+      return () => window.cancelAnimationFrame(frame);
+    }
+    if (last && !last.fromMe) setShowJump(true);
   }, [messages, scrollToBottom]);
   useEffect(() => { if (!searchOpen || matches.length === 0) return; const target = matches[Math.min(searchIndex, matches.length - 1)]; if (!target) return; document.getElementById(`msg-${target.id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }); }, [searchIndex, matches, searchOpen]);
   useEffect(() => { if (!searchOpen) return; setSearchIndex(0); }, [searchQuery, searchOpen]);
-  useEffect(() => { return () => { if (noticeTimer.current) window.clearTimeout(noticeTimer.current); if (holdRef.current?.timer) window.clearTimeout(holdRef.current.timer); holdRef.current?.cleanup?.(); mediaRef.current?.stream.getTracks().forEach((t) => t.stop()); if (audioCtxRef.current) void audioCtxRef.current.close().catch(() => undefined); }; }, []);
+  useEffect(() => {
+    return () => {
+      cancelScroll();
+      if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
+      if (holdRef.current?.timer) window.clearTimeout(holdRef.current.timer);
+      holdRef.current?.cleanup?.();
+      mediaRef.current?.stream.getTracks().forEach((t) => t.stop());
+      if (audioCtxRef.current) void audioCtxRef.current.close().catch(() => undefined);
+    };
+  }, [cancelScroll]);
+
+  // Держим последнее сообщение у нижней кромки, пока пользователь сам не
+  // пролистал вверх: подгрузка картинок и клавиатура не должны «отрывать» чат.
+  useEffect(() => {
+    const node = scrollRef.current;
+    if (!node) return;
+    let frame = 0;
+    const pin = () => {
+      if (!atBottom.current || scrollActive.current) return;
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        if (!atBottom.current || scrollActive.current) return;
+        const current = scrollRef.current;
+        if (current) current.scrollTop = current.scrollHeight - current.clientHeight;
+      });
+    };
+    const observer = new ResizeObserver(pin);
+    observer.observe(node);
+    window.visualViewport?.addEventListener("resize", pin);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.visualViewport?.removeEventListener("resize", pin);
+    };
+  }, []);
 
   const scrollToMessage = useCallback((id: string) => { document.getElementById(`msg-${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" }); setFlashId(id); window.setTimeout(() => setFlashId(null), 1600); }, []);
   
@@ -580,8 +691,11 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     const value = text.trim(); if (!value) return;
     sendMessage(chat.id, { kind: "text", text: value, replyTo: replyTo?.id });
     setText(""); setReplyTo(null); setDraft(chat.id, "");
-    if (textRef.current) textRef.current.style.height = "auto";
-    haptic(5); window.setTimeout(() => scrollToBottom(), 50);
+    if (textRef.current) {
+      textRef.current.style.height = "auto";
+      textRef.current.focus({ preventScroll: true });
+    }
+    haptic(5);
   };
 
   const handlePhoto = async (file: File) => {
@@ -596,17 +710,17 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
         src = await uploadMedia(blob, "photo");
       } catch { /* офлайн или нет бакета */ }
       sendMessage(chat.id, { kind: "photo", photo: { seed: Math.floor(Math.random() * 900) + 1, src, wide: image.width > image.height * 1.2, caption: "" }, replyTo: replyTo?.id });
-      setReplyTo(null); setAttachOpen(false); notify("Фотография отправлена"); window.setTimeout(() => scrollToBottom(), 50);
+      setReplyTo(null); setAttachOpen(false); notify("Фотография отправлена");
     } catch { notify("Не удалось открыть изображение"); }
   };
 
   const handleFile = (file: File) => {
     const ext = (file.name.split(".").pop() ?? "file").toUpperCase().slice(0, 4);
     sendMessage(chat.id, { kind: "file", file: { name: file.name, size: file.size, ext }, replyTo: replyTo?.id });
-    setReplyTo(null); setAttachOpen(false); notify("Файл отправлен"); window.setTimeout(() => scrollToBottom(), 50);
+    setReplyTo(null); setAttachOpen(false); notify("Файл отправлен");
   };
 
-  const sendPoll = () => { const q = pollQuestion.trim(); const o = pollOptions.map((v) => v.trim()).filter(Boolean); if (!q || o.length < 2) return; sendMessage(chat.id, { kind: "poll", poll: { question: q, options: o.map<PollOption>((t) => ({ id: uid("o"), text: t, votes: 0 })) }, replyTo: replyTo?.id }); setPollOpen(false); setPollQuestion(""); setPollOptions(["", ""]); setReplyTo(null); notify("Опрос создан"); window.setTimeout(() => scrollToBottom(), 50); };
+  const sendPoll = () => { const q = pollQuestion.trim(); const o = pollOptions.map((v) => v.trim()).filter(Boolean); if (!q || o.length < 2) return; sendMessage(chat.id, { kind: "poll", poll: { question: q, options: o.map<PollOption>((t) => ({ id: uid("o"), text: t, votes: 0 })) }, replyTo: replyTo?.id }); setPollOpen(false); setPollQuestion(""); setPollOptions(["", ""]); setReplyTo(null); notify("Опрос создан"); };
   const copyMessage = async (m: Message) => { const v = m.text ?? previewOf(m); try { await navigator.clipboard.writeText(v); notify("Скопировано"); } catch { notify("Не удалось скопировать"); } };
 
   const finishRecording = useCallback(() => {
@@ -699,7 +813,6 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
           });
 
       notify(session.kind === "voice" ? "Голосовое отправлено" : "Кружок отправлен");
-      window.setTimeout(() => scrollToBottom(), 60);
 
       if (!messageId) return;
       void uploadMedia(blob, session.kind)
@@ -714,7 +827,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
     } catch {
       finalize();
     }
-  }, [chat.id, notify, scrollToBottom, sendMessage, setMessageMediaSource]);
+  }, [chat.id, notify, sendMessage, setMessageMediaSource]);
 
   const beginRecording = useCallback(async (kind: "voice" | "videoNote") => {
     if (recRef.current) return;
@@ -991,7 +1104,19 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
         ) : null}
       </header>
 
-      <div ref={scrollRef} onScroll={(e) => { const node = e.currentTarget; const bottom = node.scrollHeight - node.scrollTop - node.clientHeight < 140; atBottom.current = bottom; setShowJump(!bottom); }} className="no-scrollbar relative min-h-0 flex-1 overflow-y-auto overscroll-contain px-4">
+      <div
+        ref={scrollRef}
+        onScroll={(e) => {
+          if (scrollActive.current) return;
+          const node = e.currentTarget;
+          const bottom = node.scrollHeight - node.scrollTop - node.clientHeight < 140;
+          atBottom.current = bottom;
+          setShowJump(!bottom);
+        }}
+        onWheel={cancelScroll}
+        onTouchStart={cancelScroll}
+        className="no-scrollbar relative min-h-0 flex-1 overflow-y-auto overscroll-contain px-4"
+      >
         <div className="mx-auto flex min-h-full w-full max-w-[520px] flex-col justify-end pb-2 pt-4">
           {messages.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center py-16 text-center">
@@ -1008,9 +1133,14 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
                   <span className="h-px flex-1 bg-foreground/6" />
                 </div>
                 {group.items.map((message) => {
-                  const allIndex = messages.indexOf(message);
+                  const allIndex = messageIndex.get(message.id) ?? -1;
                   const reply = message.replyTo ? byId.get(message.replyTo) : undefined;
-                  return <MessageBubble key={message.id} message={message} chat={chat} prev={messages[allIndex - 1]} next={messages[allIndex + 1]} replyMessage={reply} activeMatch={activeMatchId === message.id} flash={flashId === message.id} onMenu={openMenu} onScrollTo={scrollToMessage} searchDimmed={Boolean(query) && !searchText(message).includes(query)} onVote={(oid) => votePoll(chat.id, message.id, oid)} />;
+                  return (
+                    <Fragment key={message.id}>
+                      {unreadFromId === message.id ? <UnreadDivider /> : null}
+                      <MessageBubble message={message} chat={chat} prev={messages[allIndex - 1]} next={messages[allIndex + 1]} replyMessage={reply} activeMatch={activeMatchId === message.id} flash={flashId === message.id} onMenu={openMenu} onScrollTo={scrollToMessage} searchDimmed={Boolean(query) && !searchText(message).includes(query)} onVote={(oid) => votePoll(chat.id, message.id, oid)} onMediaLoad={keepBottomOnMedia} />
+                    </Fragment>
+                  );
                 })}
               </div>
             ))
@@ -1048,7 +1178,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
           </div>
 
           {text.trim() ? (
-            <motion.button type="button" initial={{ scale: 0.7, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} whileTap={{ scale: 0.9 }} onClick={handleSendText} className="mb-0.5 grid size-[42px] shrink-0 place-items-center rounded-full bg-primary text-primary-foreground"><Send size={17} /></motion.button>
+            <motion.button type="button" initial={{ scale: 0.7, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} whileTap={{ scale: 0.9 }} onPointerDown={(e) => e.preventDefault()} onMouseDown={(e) => e.preventDefault()} onClick={handleSendText} className="mb-0.5 grid size-[42px] shrink-0 place-items-center rounded-full bg-primary text-primary-foreground"><Send size={17} /></motion.button>
           ) : (
             <div className="mb-0.5 flex shrink-0 items-center">
               <button

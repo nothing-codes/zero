@@ -60,13 +60,20 @@ create table if not exists public.zero_messages (
   sender_username text not null default '',
   sender_avatar text,
   payload jsonb not null,
+  read_at timestamptz,
   created_at timestamptz not null default now()
 );
+
+alter table public.zero_messages
+  add column if not exists read_at timestamptz;
 
 create index if not exists zero_messages_conversation_idx
   on public.zero_messages (conversation, created_at);
 create index if not exists zero_messages_recipient_idx
   on public.zero_messages (recipient_email, created_at desc);
+create index if not exists zero_messages_unread_idx
+  on public.zero_messages (recipient_email, sender_email)
+  where read_at is null;
 
 alter table public.zero_profiles enable row level security;
 alter table public.zero_messages enable row level security;
@@ -93,6 +100,10 @@ create policy "zero_messages read"
 drop policy if exists "zero_messages insert" on public.zero_messages;
 create policy "zero_messages insert"
   on public.zero_messages for insert with check (true);
+
+drop policy if exists "zero_messages update" on public.zero_messages;
+create policy "zero_messages update"
+  on public.zero_messages for update using (true) with check (true);
 
 -- Realtime для мгновенной доставки новых сообщений.
 do $$

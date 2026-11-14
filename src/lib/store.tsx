@@ -26,6 +26,7 @@ import { supabase } from "./supabase";
 import {
   loadConversation,
   loadRecentIncoming,
+  markConversationRead,
   normalizeEmail,
   normalizeUsername,
   sendRemoteMessage,
@@ -382,6 +383,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const markRead = useCallback(
     (chatId: string) => {
+      const current = stateRef.current;
+      const chat = current.chats.find((item) => item.id === chatId);
+      const meEmail = current.user?.email ? normalizeEmail(current.user.email) : "";
+      const peerEmail = chat?.email ? normalizeEmail(chat.email) : "";
+      const hasUnread =
+        Boolean(chat) &&
+        (chat!.unread > 0 || chat!.messages.some((m) => m.fresh && !m.fromMe));
+      const shouldSendReceipt =
+        Boolean(chat?.remote) &&
+        Boolean(meEmail) &&
+        Boolean(peerEmail) &&
+        current.settings.readReceipts &&
+        hasUnread;
+
       commit((prev) => ({
         ...prev,
         chats: prev.chats.map((chat) =>
@@ -394,6 +409,10 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             : chat,
         ),
       }));
+
+      if (shouldSendReceipt) {
+        void markConversationRead(meEmail, peerEmail).catch(() => undefined);
+      }
     },
     [commit],
   );
@@ -464,21 +483,62 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [commit, pushToast],
   );
 
-  const pushToRemote = useCallback(
-    (chat: Chat, message: Message, data: SendPayload) => {
-      const current = stateRef.current.user;
-      if (!current?.email || !chat.remote || !chat.email) return;
-      void sendRemoteMessage({
-        from: current,
-        toEmail: chat.email,
-        toUsername: chat.username ?? "",
-        toName: chat.name,
-        payload: data,
-        clientId: message.id,
-        at: message.at,
-      }).catch(() => undefined);
+  const updateMessageStatus = useCallback(
+    (chatId: string, messageId: string, status: MessageStatus) => {
+      commit((prev) => ({
+        ...prev,
+        chats: prev.chats.map((c) =>
+          c.id === chatId
+            ? {
+                ...c,
+                messages: c.messages.map((m) => {
+                  if (m.id !== messageId) return m;
+                  // «Прочитано» не понижается до «отправлено», даже если
+                  // подтверждение вставки пришло позже подтверждения чтения.
+                  if (m.status === "read" && status !== "read") return m;
+                  return m.status === status ? m : { ...m, status };
+                }),
+              }
+            : c,
+        ),
+      }));
     },
-    [],
+    [commit],
+  );
+
+  const pushToRemote = useCallback(
+    async (chat: Chat, message: Message, data: SendPayload): Promise<boolean> => {
+      const current = stateRef.current.user;
+      if (!current?.email || !chat.remote || !chat.email) return false;
+      try {
+        const remoteId = await sendRemoteMessage({
+          from: current,
+          toEmail: chat.email,
+          toUsername: chat.username ?? "",
+          toName: chat.name,
+          payload: data,
+          clientId: message.id,
+          at: message.at,
+        });
+        commit((prev) => ({
+          ...prev,
+          chats: prev.chats.map((c) =>
+            c.id === chat.id
+              ? {
+                  ...c,
+                  messages: c.messages.map((m) =>
+                    m.id === message.id ? { ...m, remoteId } : m,
+                  ),
+                }
+              : c,
+          ),
+        }));
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [commit],
   );
 
   const sendMessage = useCallback(
@@ -510,32 +570,19 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const pendingMedia =
         (data.kind === "voice" && data.voice?.src?.startsWith("blob:")) ||
         (data.kind === "videoNote" && data.videoNote?.src?.startsWith("blob:"));
-      if (!pendingMedia) pushToRemote(chat, message, data);
-
-      const setStatus = (status: MessageStatus) => {
-        commit((prev) => ({
-          ...prev,
-          chats: prev.chats.map((c) =>
-            c.id === chatId
-              ? {
-                  ...c,
-                  messages: c.messages.map((m) =>
-                    m.id === message.id && m.status !== status ? { ...m, status } : m,
-                  ),
-                }
-              : c,
-          ),
-        }));
-      };
-
-      window.setTimeout(() => setStatus("sent"), 520);
-      window.setTimeout(() => {
-        if (stateRef.current.settings.readReceipts) setStatus("read");
-      }, 1500);
+      if (!pendingMedia) {
+        if (chat.remote) {
+          void pushToRemote(chat, message, data).then((ok) => {
+            if (ok) updateMessageStatus(chatId, message.id, "sent");
+          });
+        } else {
+          updateMessageStatus(chatId, message.id, "sent");
+        }
+      }
 
       return message.id;
     },
-    [commit, pushToRemote],
+    [commit, pushToRemote, updateMessageStatus],
   );
 
   const setMessageMediaSource = useCallback(
@@ -568,9 +615,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         kind === "voice"
           ? { kind: "voice", voice: message.voice }
           : { kind: "videoNote", videoNote: message.videoNote };
-      pushToRemote(chat, message, payload);
+      void pushToRemote(chat, message, payload).then((ok) => {
+        if (ok) updateMessageStatus(chatId, messageId, "sent");
+      });
     },
-    [commit, pushToRemote],
+    [commit, pushToRemote, updateMessageStatus],
   );
 
   const forwardMessage = useCallback(
@@ -606,24 +655,17 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (stateRef.current.settings.sound) playTone("send");
 
       const target = stateRef.current.chats.find((c) => c.id === targetChatId);
-      if (target) pushToRemote(target, clone, payloadOf(clone));
-      window.setTimeout(() => {
-        commit((prev) => ({
-          ...prev,
-          chats: prev.chats.map((c) =>
-            c.id === targetChatId
-              ? {
-                  ...c,
-                  messages: c.messages.map((m) =>
-                    m.id === clone.id ? { ...m, status: "sent" } : m,
-                  ),
-                }
-              : c,
-          ),
-        }));
-      }, 500);
+      if (target) {
+        if (target.remote) {
+          void pushToRemote(target, clone, payloadOf(clone)).then((ok) => {
+            if (ok) updateMessageStatus(targetChatId, clone.id, "sent");
+          });
+        } else {
+          updateMessageStatus(targetChatId, clone.id, "sent");
+        }
+      }
     },
-    [commit, pushToRemote],
+    [commit, pushToRemote, updateMessageStatus],
   );
 
   const setActiveChat = useCallback((id: string | null) => {
@@ -888,7 +930,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         chatId,
         fromMe: normalizeEmail(row.sender_email) === myEmail,
         at: new Date(row.created_at).getTime(),
-        status: normalizeEmail(row.sender_email) === myEmail ? "read" : undefined,
+        status:
+          normalizeEmail(row.sender_email) === myEmail
+            ? row.read_at
+              ? "read"
+              : "sent"
+            : undefined,
         remoteId: row.id,
         ...row.payload,
       }));
@@ -918,30 +965,51 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     const currentUser = state.user;
     if (!currentUser?.email) return;
     const email = normalizeEmail(currentUser.email);
-    const channel = subscribeToIncoming(email, (row) => {
-      const senderEmail = normalizeEmail(row.sender_email);
-      if (senderEmail === email) return;
-      const senderUsername = normalizeUsername(row.sender_username);
-      // openOrCreateChat сам найдёт существующий чат по email/@username и
-      // при необходимости сделает его настоящим (email + remote).
-      const chatId = openOrCreateChat({
-        name: row.sender_name || row.sender_username || senderEmail,
-        username: senderUsername,
-        email: senderEmail,
-        avatar: row.sender_avatar,
-        online: true,
-        remote: true,
-      });
-      receiveMessage(chatId, row.payload, {
-        id: row.id,
-        at: new Date(row.created_at).getTime() || Date.now(),
-      });
-    });
+    const channel = subscribeToIncoming(
+      email,
+      (row) => {
+        const senderEmail = normalizeEmail(row.sender_email);
+        if (senderEmail === email) return;
+        const senderUsername = normalizeUsername(row.sender_username);
+        // openOrCreateChat сам найдёт существующий чат по email/@username и
+        // при необходимости сделает его настоящим (email + remote).
+        const chatId = openOrCreateChat({
+          name: row.sender_name || row.sender_username || senderEmail,
+          username: senderUsername,
+          email: senderEmail,
+          avatar: row.sender_avatar,
+          online: true,
+          remote: true,
+        });
+        receiveMessage(chatId, row.payload, {
+          id: row.id,
+          at: new Date(row.created_at).getTime() || Date.now(),
+        });
+      },
+      (row) => {
+        if (!row.read_at) return;
+        const peerEmail = normalizeEmail(row.recipient_email);
+        commit((prev) => ({
+          ...prev,
+          chats: prev.chats.map((chat) => {
+            if (!chat.email || normalizeEmail(chat.email) !== peerEmail) return chat;
+            let changed = false;
+            const messages = chat.messages.map((message) => {
+              if (message.remoteId !== row.id && message.id !== row.client_id) return message;
+              if (message.status === "read") return message;
+              changed = true;
+              return { ...message, status: "read" as const };
+            });
+            return changed ? { ...chat, messages } : chat;
+          }),
+        }));
+      },
+    );
 
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [state.user?.id, openOrCreateChat, receiveMessage]);
+  }, [state.user?.id, openOrCreateChat, receiveMessage, commit]);
 
   // При входе "догоняем" входящие, которые пришли, пока приложение было
   // закрыто: Realtime доставляет только то, что случилось при открытой

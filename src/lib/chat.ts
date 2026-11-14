@@ -33,6 +33,7 @@ export interface RemoteMessageRow {
   sender_username: string;
   sender_avatar: string | null;
   payload: MessagePayload;
+  read_at: string | null;
   created_at: string;
 }
 
@@ -106,7 +107,7 @@ export async function loadConversation(
   const { data, error } = await supabase
     .from(MESSAGE_TABLE)
     .select(
-      "id,client_id,conversation,sender_email,recipient_email,sender_name,sender_username,sender_avatar,payload,created_at",
+      "id,client_id,conversation,sender_email,recipient_email,sender_name,sender_username,sender_avatar,payload,read_at,created_at",
     )
     .eq("conversation", key)
     // Берём последние 500 сообщений (а не первые): в долгой переписке
@@ -132,7 +133,7 @@ export async function loadRecentIncoming(
   const { data, error } = await supabase
     .from(MESSAGE_TABLE)
     .select(
-      "id,client_id,conversation,sender_email,recipient_email,sender_name,sender_username,sender_avatar,payload,created_at",
+      "id,client_id,conversation,sender_email,recipient_email,sender_name,sender_username,sender_avatar,payload,read_at,created_at",
     )
     .eq("recipient_email", email)
     .order("created_at", { ascending: false })
@@ -175,15 +176,35 @@ export async function sendRemoteMessage(input: {
   return String(data.id);
 }
 
+/** Отмечает все входящие сообщения от собеседника как прочитанные. */
+export async function markConversationRead(
+  meEmail: string,
+  peerEmail: string,
+): Promise<void> {
+  const email = normalizeEmail(meEmail);
+  const peer = normalizeEmail(peerEmail);
+  if (!email || !peer) return;
+
+  const { error } = await supabase
+    .from(MESSAGE_TABLE)
+    .update({ read_at: new Date().toISOString() })
+    .eq("recipient_email", email)
+    .eq("sender_email", peer)
+    .is("read_at", null);
+
+  if (error) throw error;
+}
+
 /** Подписка на входящие сообщения текущего пользователя через Realtime. */
 export function subscribeToIncoming(
   meEmail: string,
   onRow: (row: RemoteMessageRow) => void,
+  onUpdate?: (row: RemoteMessageRow) => void,
 ) {
   const email = normalizeEmail(meEmail);
   const channelName = `zero-chat-${email.replace(/[^a-z0-9]/gi, "-")}`;
 
-  return supabase
+  let channel = supabase
     .channel(channelName)
     .on(
       "postgres_changes",
@@ -197,6 +218,23 @@ export function subscribeToIncoming(
         const row = event.new as RemoteMessageRow | null;
         if (row?.id) onRow(row);
       },
-    )
-    .subscribe();
+    );
+
+  if (onUpdate) {
+    channel = channel.on(
+      "postgres_changes",
+      {
+        event: "UPDATE",
+        schema: "public",
+        table: MESSAGE_TABLE,
+        filter: `sender_email=eq.${email}`,
+      },
+      (event) => {
+        const row = event.new as RemoteMessageRow | null;
+        if (row?.id) onUpdate(row);
+      },
+    );
+  }
+
+  return channel.subscribe();
 }
