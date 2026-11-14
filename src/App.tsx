@@ -24,9 +24,7 @@ const TABS: Tab[] = ["chats", "contacts", "calls", "settings"];
 
 export function App() {
   const { state, user, openOrCreateChat } = useStore();
-  const isDesktopHook = useIsDesktop();
-  const isElectron = typeof navigator !== "undefined" && navigator.userAgent.toLowerCase().includes("electron");
-  const isDesktop = isDesktopHook || isElectron;
+  const isDesktop = useIsDesktop();
   const [tab, setTab] = useState<Tab>("chats");
   const [overlay, setOverlay] = useState<Overlay>(null);
   const [call, setCall] = useState<ActiveCall>(null);
