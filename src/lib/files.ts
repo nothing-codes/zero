@@ -213,24 +213,13 @@ export function triggerBlobDownload(blob: Blob, filename: string) {
   window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
-/** Сохраняет фото в галерею через системный лист или диалог сохранения. */
+/** Сохраняет фото в галерею через системный диалог сохранения. */
 export async function saveImageToGallery(
   blob: Blob,
   filename: string,
-): Promise<"shared" | "saved" | "canceled"> {
+): Promise<"saved" | "canceled"> {
   const type = blob.type.startsWith("image/") ? blob.type : "image/jpeg";
   const file = new File([blob], safeFileName(filename), { type });
-
-  if (typeof navigator.share === "function" && typeof navigator.canShare === "function") {
-    try {
-      if (navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: file.name });
-        return "shared";
-      }
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return "canceled";
-    }
-  }
 
   const picker = pickerWindow().showSaveFilePicker;
   if (picker) {

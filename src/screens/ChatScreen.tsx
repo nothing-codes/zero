@@ -1,4 +1,4 @@
-import { AnimatePresence, motion } from "motion/react";
+import { AnimatePresence, animate, motion, useMotionValue, useTransform } from "motion/react";
 import {
   ArrowDown, ArrowLeft, BadgeCheck, Ban, BarChart3, Camera, Check, CheckCheck, ChevronDown, Clock3, Copy, Download, Eraser, FileArchive, FileAudio, FileImage, FileSpreadsheet, FileText, FileVideo, File as FileIcon, Forward, Image as ImageIcon, Mail, Mic, MoreVertical, Paperclip, Pause, Pencil, Phone, Pin, Play, Plus, Reply, Search, Send, Trash2, Video, X,
 } from "lucide-react";
@@ -367,9 +367,9 @@ function FileBubble({
 }
 
 function MessageBubble({
-  message, chat, prev, next, replyMessage, activeMatch, flash, onMenu, onScrollTo, searchDimmed, onVote, onMediaLoad, transfer, onFileDownload, onFileCancel,
+  message, chat, prev, next, replyMessage, activeMatch, flash, onMenu, onScrollTo, searchDimmed, onVote, onMediaLoad, transfer, onFileDownload, onFileCancel, onReply,
 }: {
-  message: Message; chat: Chat; prev?: Message; next?: Message; replyMessage?: Message; activeMatch: boolean; flash: boolean; onMenu: (m: Message, x: number, y: number) => void; onScrollTo: (id: string) => void; searchDimmed: boolean; onVote: (id: string) => void; onMediaLoad: () => void; transfer?: FileTransfer; onFileDownload: (m: Message) => void; onFileCancel: (m: Message) => void;
+  message: Message; chat: Chat; prev?: Message; next?: Message; replyMessage?: Message; activeMatch: boolean; flash: boolean; onMenu: (m: Message, x: number, y: number) => void; onScrollTo: (id: string) => void; searchDimmed: boolean; onVote: (id: string) => void; onMediaLoad: () => void; transfer?: FileTransfer; onFileDownload: (m: Message) => void; onFileCancel: (m: Message) => void; onReply: (m: Message) => void;
 }) {
   const mine = message.fromMe;
   const isGroup = Boolean(chat.group);
@@ -378,11 +378,28 @@ function MessageBubble({
   const sameAsNext = Boolean(next && next.fromMe === message.fromMe && next.sender === message.sender && timeGap(message, next));
   const pressTimer = useRef<number | null>(null);
   const startPoint = useRef({ x: 0, y: 0 });
+  const swipeX = useMotionValue(0);
+  const replyOpacity = useTransform(swipeX, [-70, -8], [1, 0]);
+  const replyScale = useTransform(swipeX, [-70, 0], [1, 0.7]);
+  const swipe = useRef({ active: false, locked: false, startX: 0, startY: 0, dx: 0 });
+
+  const SWIPE_TRIGGER = 54;
+  const SWIPE_MAX = 96;
 
   const clearPress = () => { if (pressTimer.current) window.clearTimeout(pressTimer.current); pressTimer.current = null; };
+
+  const isInteractive = (target: EventTarget | null) =>
+    target instanceof HTMLElement && Boolean(target.closest("button, a, input, textarea, audio, video, [role='slider']"));
+
+  const resetSwipe = () => {
+    clearPress();
+    swipe.current = { active: false, locked: false, startX: 0, startY: 0, dx: 0 };
+    animate(swipeX, 0, { type: "spring", stiffness: 480, damping: 36, mass: 0.5 });
+  };
   
   const onPointerDown = (e: ReactPointerEvent) => {
-    if ((e.target as HTMLElement).closest("button, [role='slider']")) return;
+    if (isInteractive(e.target)) return;
+    swipe.current = { active: true, locked: false, startX: e.clientX, startY: e.clientY, dx: 0 };
     startPoint.current = { x: e.clientX, y: e.clientY };
     clearPress();
     pressTimer.current = window.setTimeout(() => { 
@@ -392,10 +409,49 @@ function MessageBubble({
   };
   
   const onPointerMove = (e: ReactPointerEvent) => {
+    const state = swipe.current;
+    if (state.active) {
+      const dx = e.clientX - state.startX;
+      const dy = e.clientY - state.startY;
+      if (!state.locked) {
+        if (Math.abs(dx) < 6 && Math.abs(dy) < 6) return;
+        if (dx < 0 && Math.abs(dx) > Math.abs(dy) * 1.2) {
+          state.locked = true;
+          clearPress();
+          try { (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId); } catch { /* noop */ }
+        } else {
+          state.active = false;
+          clearPress();
+          return;
+        }
+      }
+      if (state.locked) {
+        const raw = Math.min(0, dx);
+        const offset = raw < -SWIPE_MAX ? -SWIPE_MAX + (raw + SWIPE_MAX) * 0.2 : raw;
+        state.dx = offset;
+        swipeX.set(offset);
+        return;
+      }
+    }
     if (!pressTimer.current) return;
     const dx = Math.abs(e.clientX - startPoint.current.x);
     const dy = Math.abs(e.clientY - startPoint.current.y);
     if (dx > 8 || dy > 8) clearPress();
+  };
+
+  const onPointerUp = () => {
+    clearPress();
+    const state = swipe.current;
+    if (state.locked) {
+      if (state.dx <= -SWIPE_TRIGGER) {
+        haptic(6);
+        onReply(message);
+      }
+      resetSwipe();
+      return;
+    }
+    state.active = false;
+    swipeX.set(0);
   };
 
   const bubbleRadius = mine ? cn("rounded-[20px]", !sameAsNext && "rounded-br-[7px]") : cn("rounded-[20px]", !sameAsNext && "rounded-bl-[7px]");
@@ -446,11 +502,16 @@ function MessageBubble({
   })();
 
   return (
-    <motion.div layout initial={{ opacity: 0, y: 15, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ type: "spring", stiffness: 400, damping: 25 }} id={`msg-${message.id}`} className={cn("group flex w-full gap-2", mine ? "justify-end" : "justify-start", sameAsPrev ? "mt-[3px]" : "mt-2.5", searchDimmed && "opacity-25")} onPointerDown={onPointerDown} onPointerUp={clearPress} onPointerLeave={clearPress} onPointerMove={onPointerMove} onContextMenu={(e) => { e.preventDefault(); onMenu(message, e.clientX, e.clientY); }} style={{ filter: searchDimmed ? "grayscale(1)" : undefined }}>
+    <motion.div layout initial={{ opacity: 0, y: 15, scale: 0.95 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ type: "spring", stiffness: 400, damping: 25 }} id={`msg-${message.id}`} className={cn("group flex w-full gap-2", mine ? "justify-end" : "justify-start", sameAsPrev ? "mt-[3px]" : "mt-2.5", searchDimmed && "opacity-25")} onPointerDown={onPointerDown} onPointerUp={onPointerUp} onPointerLeave={clearPress} onPointerCancel={resetSwipe} onPointerMove={onPointerMove} onContextMenu={(e) => { e.preventDefault(); onMenu(message, e.clientX, e.clientY); }} style={{ filter: searchDimmed ? "grayscale(1)" : undefined, touchAction: "pan-y" }}>
       {!mine && isGroup ? <div className="w-6 shrink-0 self-end">{!sameAsNext ? <Avatar name={message.sender ?? chat.name} size={24} /> : null}</div> : null}
       <div className={cn("flex min-w-0 max-w-[82%] flex-col", mine ? "items-end" : "items-start")}>
         {!mine && isGroup && !sameAsPrev ? <span className="t-cap mb-1 pl-1 text-faint">{message.sender ?? chat.name}</span> : null}
-        <div className={cn("relative", activeMatch && "rounded-[22px] ring-1 ring-foreground/60 ring-offset-2 ring-offset-background", flash && "msg-new rounded-[22px]")}>{content}</div>
+        <div className={cn("relative", activeMatch && "rounded-[22px] ring-1 ring-foreground/60 ring-offset-2 ring-offset-background", flash && "msg-new rounded-[22px]")}>
+          <motion.span style={{ opacity: replyOpacity, scale: replyScale }} className={cn("pointer-events-none absolute right-2 top-1/2 z-0 grid size-9 -translate-y-1/2 place-items-center rounded-full", mine ? "bg-primary-foreground/15 text-primary-foreground" : "bg-foreground/10 text-foreground/80")}>
+            <Reply size={16} />
+          </motion.span>
+          <motion.div style={{ x: swipeX }} className="relative z-10">{content}</motion.div>
+        </div>
       </div>
     </motion.div>
   );
@@ -838,7 +899,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
       const ext = type.includes("png") ? "png" : type.includes("webp") ? "webp" : type.includes("gif") ? "gif" : "jpg";
       const outcome = await saveImageToGallery(blob, `zero-${Date.now()}.${ext}`);
       if (outcome === "canceled") return;
-      notify(outcome === "shared" ? "Выберите «Сохранить в галерею»" : "Фото сохранено");
+      notify("Фото сохранено");
     } catch {
       notify("Не удалось сохранить фото");
     }
@@ -1351,7 +1412,7 @@ function ChatRoom({ chat, onBack, onCall }: { chat: Chat; onBack: () => void; on
                   return (
                     <Fragment key={message.id}>
                       {unreadFromId === message.id ? <UnreadDivider /> : null}
-                      <MessageBubble message={message} chat={chat} prev={messages[allIndex - 1]} next={messages[allIndex + 1]} replyMessage={reply} activeMatch={activeMatchId === message.id} flash={flashId === message.id} onMenu={openMenu} onScrollTo={scrollToMessage} searchDimmed={Boolean(query) && !searchText(message).includes(query)} onVote={(oid) => votePoll(chat.id, message.id, oid)} onMediaLoad={keepBottomOnMedia} transfer={transfers[message.id]} onFileDownload={(item) => { void downloadMessageFile(item); }} onFileCancel={cancelFileTransfer} />
+                      <MessageBubble message={message} chat={chat} prev={messages[allIndex - 1]} next={messages[allIndex + 1]} replyMessage={reply} activeMatch={activeMatchId === message.id} flash={flashId === message.id} onMenu={openMenu} onScrollTo={scrollToMessage} searchDimmed={Boolean(query) && !searchText(message).includes(query)} onVote={(oid) => votePoll(chat.id, message.id, oid)} onMediaLoad={keepBottomOnMedia} transfer={transfers[message.id]} onFileDownload={(item) => { void downloadMessageFile(item); }} onFileCancel={cancelFileTransfer} onReply={(item) => { setReplyTo(item); window.setTimeout(() => textRef.current?.focus({ preventScroll: true }), 80); }} />
                     </Fragment>
                   );
                 })}
