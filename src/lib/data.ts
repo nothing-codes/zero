@@ -64,6 +64,7 @@ export const SEED_CHATS: Chat[] = [
     email: "zero@gmail.com",
     verified: true,
     avatar: "/icon-512.png",
+    remote: true,
     unread: 1,
     messages: [
       m({ chatId: zeroId, fromMe: false, kind: "text", at: at(46 * MIN), text: "Добро пожаловать в Zero." }),

@@ -1080,7 +1080,7 @@ function ChatRoom({ chat, onBack, onCall, onOpenChat, desktop = false }: { chat:
   }, []);
 
   useLayoutEffect(() => { const node = scrollRef.current; if (node) node.scrollTop = node.scrollHeight; }, [chat.id]);
-  useEffect(() => { if (!chat.remote) return; void loadChatHistory(chat.id); }, [chat.id, chat.remote, loadChatHistory]);
+  useEffect(() => { if (!chat.remote && !chat.saved) return; void loadChatHistory(chat.id); }, [chat.id, chat.remote, chat.saved, loadChatHistory]);
   useEffect(() => { void syncPollVotes(chat.id); }, [chat.id, syncPollVotes]);
   useEffect(() => { setActiveChat(chat.id); markRead(chat.id); return () => setActiveChat(null); }, [chat.id, markRead, setActiveChat]);
   useEffect(() => { markRead(chat.id); }, [messages.length, chat.id, markRead]);

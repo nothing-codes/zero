@@ -36,9 +36,11 @@ import {
   editGroupMessage,
   editRemoteMessage,
   loadConversation,
-  loadRecentIncoming,
+  loadProfile,
+  loadRecentAccount,
   markConversationRead,
   normalizeEmail,
+  normalizeProfileRow,
   normalizeUsername,
   sendRemoteMessage,
   subscribeToIncoming,
@@ -54,7 +56,7 @@ import {
   pollIdOf,
   subscribePollVotes,
 } from "./polls";
-import { registerDevice } from "./devices";
+import { deviceStillActive, registerDevice, subscribeDeviceRevoked } from "./devices";
 import { subscribePresence } from "./presence";
 import { deleteStoragePaths, storagePathFromUrl } from "./files";
 import { isZeroIdentity } from "./identity";
@@ -101,6 +103,8 @@ function cleanUser(user: User | null): User | null {
 function cleanChats(chats: Chat[]): Chat[] {
   return chats.map((chat) => ({
     ...chat,
+    // Чат Zero — настоящий аккаунт: сообщения и файлы уходят на сервер.
+    remote: chat.id === "c_zero" ? true : chat.remote,
     typing: false,
     name: stripEmoji(chat.name),
     messages: chat.messages.map((message) => {
@@ -201,6 +205,8 @@ function userFromProfile(profile: ZeroProfile & { createdAt?: number }): User {
     bio: stripEmoji(profile.bio ?? ""),
     status: stripEmoji(profile.status ?? "") || "На связи",
     avatar: profile.avatar ?? null,
+    banner: profile.banner ?? null,
+    pinnedMusic: profile.pinnedMusic ?? null,
     createdAt: profile.createdAt ?? Date.now(),
   };
 }
@@ -440,6 +446,119 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     migrateLegacyContent(state.user.email);
   }, [state.user, state.settings.lastSeen, state.settings.profilePhoto, state.settings.phoneNumber]);
 
+  // При входе берём профиль с сервера, чтобы удалённые баннер и музыка
+  // не оставались в локальной копии.
+  useEffect(() => {
+    const current = state.user;
+    if (!current?.email) return;
+    const email = normalizeEmail(current.email);
+    let cancelled = false;
+
+    void loadProfile(email)
+      .then((profile) => {
+        if (cancelled) return;
+        commit((prev) => {
+          if (!prev.user || normalizeEmail(prev.user.email) !== email) return prev;
+          const next: User = profile
+            ? {
+                ...prev.user,
+                name: profile.name || prev.user.name,
+                username: profile.username || prev.user.username,
+                avatar: profile.avatar ?? null,
+                banner: profile.banner ?? null,
+                bio: profile.bio,
+                status: profile.status || prev.user.status,
+                pinnedMusic: profile.pinnedMusic ?? null,
+              }
+            : { ...prev.user, banner: null, pinnedMusic: null };
+          const changed =
+            next.name !== prev.user.name ||
+            next.username !== prev.user.username ||
+            next.avatar !== prev.user.avatar ||
+            next.banner !== prev.user.banner ||
+            next.bio !== prev.user.bio ||
+            next.status !== prev.user.status ||
+            JSON.stringify(next.pinnedMusic ?? null) !== JSON.stringify(prev.user.pinnedMusic ?? null);
+          if (!changed) return prev;
+          return { ...prev, user: next, accounts: { ...prev.accounts, [email]: next } };
+        });
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [state.user?.email, commit]);
+
+  // Профиль, изменённый на другом устройстве, сразу появляется здесь.
+  useEffect(() => {
+    const current = state.user;
+    if (!current?.email) return;
+    const email = normalizeEmail(current.email);
+    const channel = supabase
+      .channel(`zero-profile-${email.replace(/[^a-z0-9]/gi, "-")}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "zero_profiles",
+          filter: `email=eq.${email}`,
+        },
+        (payload) => {
+          const row = payload.new as Record<string, unknown> | null;
+          if (!row) return;
+          const profile = normalizeProfileRow(row);
+          commit((prev) => {
+            if (!prev.user || normalizeEmail(prev.user.email) !== email) return prev;
+            const next: User = {
+              ...prev.user,
+              name: profile.name || prev.user.name,
+              username: profile.username || prev.user.username,
+              avatar: profile.avatar ?? null,
+              banner: profile.banner ?? null,
+              bio: profile.bio,
+              status: profile.status || prev.user.status,
+              pinnedMusic: profile.pinnedMusic ?? null,
+            };
+            const changed =
+              next.name !== prev.user.name ||
+              next.username !== prev.user.username ||
+              next.avatar !== prev.user.avatar ||
+              next.banner !== prev.user.banner ||
+              next.bio !== prev.user.bio ||
+              next.status !== prev.user.status ||
+              JSON.stringify(next.pinnedMusic ?? null) !== JSON.stringify(prev.user.pinnedMusic ?? null);
+            if (!changed) return prev;
+            return {
+              ...prev,
+              user: next,
+              accounts: { ...prev.accounts, [email]: next },
+            };
+          });
+        },
+      )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "zero_profiles" },
+        (payload) => {
+          const old = payload.old as { email?: string } | null;
+          if (!old?.email || normalizeEmail(old.email) !== email) return;
+          commit((prev) => {
+            if (!prev.user || normalizeEmail(prev.user.email) !== email) return prev;
+            if (!prev.user.banner && !prev.user.pinnedMusic) return prev;
+            const next: User = { ...prev.user, banner: null, pinnedMusic: null };
+            return { ...prev, user: next, accounts: { ...prev.accounts, [email]: next } };
+          });
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [state.user?.email, commit]);
+
   // Онлайн-статусы в реальном времени. Presence обновляет точку у аватара
   // и «был(а) в сети…» у всех собеседников, а не только после сообщения.
   useEffect(() => {
@@ -476,16 +595,59 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return () => session.stop();
   }, [state.user?.id, state.user?.name, state.user?.username, state.user?.avatar, state.settings.lastSeen, commit]);
 
-  // Активные устройства: регистрируем этот браузер и обновляем heartbeat.
+  // Активные устройства: регистрируем этот браузер, обновляем heartbeat и
+  // мгновенно выходим, если сеанс завершили на другом устройстве.
   useEffect(() => {
     const email = state.user?.email;
     if (!email) return;
-    void registerDevice(email).catch(() => undefined);
-    const timer = window.setInterval(() => {
-      void registerDevice(email).catch(() => undefined);
+    const account = normalizeEmail(email);
+    let cancelled = false;
+    let registered = false;
+
+    const revoke = () => {
+      if (cancelled) return;
+      commit((prev) => {
+        if (!prev.user || normalizeEmail(prev.user.email) !== account) return prev;
+        const key = accountKey(prev.user.email || prev.user.phone || "");
+        return {
+          ...prev,
+          user: null,
+          accounts: key ? { ...prev.accounts, [key]: prev.user } : prev.accounts,
+        };
+      });
+    };
+
+    const check = async () => {
+      try {
+        const active = await deviceStillActive(account);
+        if (!active && registered) revoke();
+      } catch {
+        /* сеть недоступна — проверим позже */
+      }
+    };
+
+    void registerDevice(account)
+      .then(() => { registered = true; })
+      .catch(() => undefined);
+
+    const channel = subscribeDeviceRevoked(account, revoke);
+    const heartbeat = window.setInterval(() => {
+      void registerDevice(account).catch(() => undefined);
     }, 4 * 60_000);
-    return () => window.clearInterval(timer);
-  }, [state.user?.email]);
+    const watchdog = window.setInterval(() => { void check(); }, 15_000);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void check();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(heartbeat);
+      window.clearInterval(watchdog);
+      document.removeEventListener("visibilitychange", onVisible);
+      if (channel) void supabase.removeChannel(channel);
+    };
+  }, [state.user?.email, commit]);
 
   // Theme + motion preferences
   useEffect(() => {
@@ -672,13 +834,16 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const pushToRemote = useCallback(
     async (chat: Chat, message: Message, data: SendPayload): Promise<boolean> => {
       const current = stateRef.current.user;
-      if (!current?.email || !chat.remote || !chat.email) return false;
+      if (!current?.email || chat.group) return false;
+      // Избранное синхронизируется через тот же канал: заметка самому себе.
+      const toEmail = chat.saved ? normalizeEmail(current.email) : chat.email;
+      if (!toEmail) return false;
       try {
         const remoteId = await sendRemoteMessage({
           from: current,
-          toEmail: chat.email,
-          toUsername: chat.username ?? "",
-          toName: chat.name,
+          toEmail,
+          toUsername: chat.saved ? current.username : chat.username ?? "",
+          toName: chat.saved ? current.name : chat.name,
           payload: data,
           clientId: message.id,
           at: message.at,
@@ -781,7 +946,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           void pushGroupToRemote(chat, message, data).then((ok) => {
             if (ok) updateMessageStatus(chatId, message.id, "sent");
           });
-        } else if (chat.remote) {
+        } else if (chat.remote || chat.saved) {
           void pushToRemote(chat, message, data).then((ok) => {
             if (ok) updateMessageStatus(chatId, message.id, "sent");
           });
@@ -832,6 +997,11 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             : { kind: "file" as const, file: message.file }),
         ...(chat.group ? { group: groupInfoOf(chat) } : {}),
       };
+      if (!chat.group && !chat.email && !chat.saved) {
+        // Локальный чат: файл загружен, сообщение готово.
+        updateMessageStatus(chatId, messageId, "sent");
+        return;
+      }
       const push = chat.group
         ? pushGroupToRemote(chat, message, payload)
         : pushToRemote(chat, message, payload);
@@ -1033,13 +1203,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         } catch {
           return false;
         }
-      } else if (chat.remote && chat.email) {
+      } else if ((chat.remote && chat.email) || chat.saved) {
         try {
           await editRemoteMessage({
             id: message.remoteId,
             clientId: message.id,
             senderEmail: meEmail,
-            peerEmail: chat.email,
+            peerEmail: chat.email ?? meEmail,
             payload,
           });
         } catch {
@@ -1073,7 +1243,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       if (!chat || !message) return false;
 
       const pending = message.status === "sending" && !message.remoteId;
-      if (chat.remote && !pending) {
+      if ((chat.remote || chat.saved) && !pending) {
         try {
           await deleteRemoteMessage({
             id: message.remoteId,
@@ -1605,6 +1775,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
             return true;
           })
           .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+      } else if (chat.saved) {
+        try {
+          rows = (await loadConversation(myEmail, myEmail)).filter(
+            (row) => !row.payload.group,
+          );
+        } catch {
+          return;
+        }
       } else {
         if (!chat.remote || !chat.email) return;
         try {
@@ -1658,6 +1836,133 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       void syncPollVotes(chatId);
     },
     [commit, syncPollVotes],
+  );
+
+  /**
+   * Применяет пачку сообщений из базы в обе стороны. Так изменения с другого
+   * устройства аккаунта появляются здесь сразу и без дублей.
+   */
+  const applySyncedRows = useCallback(
+    (rows: RemoteMessageRow[], meEmail: string) => {
+      const email = normalizeEmail(meEmail);
+      if (!email || rows.length === 0) return;
+
+      const byChat = new Map<string, RemoteMessageRow[]>();
+      for (const row of rows) {
+        const sender = normalizeEmail(row.sender_email);
+        const own = sender === email;
+        const group = row.payload.group;
+        let chatId: string | undefined;
+
+        if (group) {
+          chatId = openOrCreateGroup(group);
+        } else if (own) {
+          const peer = normalizeEmail(row.recipient_email);
+          if (!peer) continue;
+          if (peer === email) {
+            // Заметки «Избранное» летят на сервер как сообщение самому себе.
+            chatId = stateRef.current.chats.find((chat) => chat.saved)?.id ?? SAVED_CHAT_ID;
+          } else {
+            const existing = stateRef.current.chats.find(
+              (chat) => Boolean(chat.email) && normalizeEmail(chat.email ?? "") === peer,
+            );
+            chatId = openOrCreateChat({
+              name: existing?.name ?? peer.split("@")[0],
+              email: peer,
+              username: existing?.username,
+              avatar: existing?.avatar ?? null,
+              remote: true,
+            });
+          }
+        } else {
+          chatId = openOrCreateChat({
+            name: row.sender_name || row.sender_username || sender,
+            username: row.sender_username,
+            email: sender,
+            avatar: row.sender_avatar,
+            remote: true,
+          });
+        }
+
+        if (!chatId) continue;
+        const list = byChat.get(chatId) ?? [];
+        list.push(row);
+        byChat.set(chatId, list);
+      }
+
+      for (const [chatId, list] of byChat) {
+        commit((prev) => ({
+          ...prev,
+          chats: prev.chats.map((chat) => {
+            if (chat.id !== chatId) return chat;
+            let changed = false;
+            let addedIncoming = 0;
+            const messages = [...chat.messages];
+
+            for (const row of list) {
+              const own = normalizeEmail(row.sender_email) === email;
+              const remoteId = row.id;
+              const clientId = row.client_id || undefined;
+              const index = messages.findIndex(
+                (message) =>
+                  message.remoteId === remoteId ||
+                  message.id === remoteId ||
+                  (clientId && (message.id === clientId || message.remoteId === clientId)),
+              );
+
+              if (index >= 0) {
+                const existing = messages[index];
+                const status = own
+                  ? row.read_at
+                    ? ("read" as const)
+                    : existing.status === "read"
+                      ? ("read" as const)
+                      : ("sent" as const)
+                  : existing.status;
+                if (
+                  existing.remoteId !== remoteId ||
+                  (own && existing.status !== status) ||
+                  row.payload.edited
+                ) {
+                  messages[index] = {
+                    ...existing,
+                    ...(row.payload.edited ? row.payload : {}),
+                    remoteId,
+                    status,
+                  };
+                  changed = true;
+                }
+                continue;
+              }
+
+              messages.push({
+                id: own ? clientId ?? remoteId : remoteId,
+                chatId,
+                fromMe: own,
+                at: new Date(row.created_at).getTime() || Date.now(),
+                status: own ? (row.read_at ? "read" : "sent") : undefined,
+                sender: own ? undefined : row.sender_name || row.sender_username || normalizeEmail(row.sender_email),
+                senderAvatar: own ? null : row.sender_avatar ?? null,
+                remoteId,
+                fresh: !own && activeChatRef.current !== chatId,
+                ...row.payload,
+              });
+              if (!own) addedIncoming += 1;
+              changed = true;
+            }
+
+            if (!changed) return chat;
+            return {
+              ...chat,
+              typing: false,
+              unread: activeChatRef.current === chatId ? 0 : chat.unread + addedIncoming,
+              messages: messages.sort((a, b) => a.at - b.at),
+            };
+          }),
+        }));
+      }
+    },
+    [commit, openOrCreateChat, openOrCreateGroup],
   );
 
   // Realtime: входящие сообщения от других людей приходят сразу, без
@@ -1757,17 +2062,25 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           }),
         }));
       },
+      // Своё сообщение, отправленное с другого устройства аккаунта.
+      (row) => {
+        void decryptRemoteRow(row, email)
+          .then((decrypted) => {
+            if (undecryptable(decrypted.payload)) return;
+            applySyncedRows([decrypted], email);
+          })
+          .catch(() => undefined);
+      },
     );
 
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [state.user?.id, openOrCreateChat, openOrCreateGroup, receiveMessage, commit]);
+  }, [state.user?.id, openOrCreateChat, openOrCreateGroup, receiveMessage, applySyncedRows, commit]);
 
-  // При входе "догоняем" входящие, которые пришли, пока приложение было
-  // закрыто: Realtime доставляет только то, что случилось при открытой
-  // вкладке. Уже известные сообщения не дублируются и не считаются
-  // непрочитанными повторно.
+  // Полная синхронизация аккаунта в обе стороны. Realtime даёт мгновенную
+  // доставку, а периодический догон гарантирует, что новые сообщения с
+  // других устройств появятся даже после обрыва соединения.
   useEffect(() => {
     const currentUser = state.user;
     if (!currentUser?.email) {
@@ -1775,106 +2088,38 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       return;
     }
     const email = normalizeEmail(currentUser.email);
-    if (syncedFor.current === email) return;
-    syncedFor.current = email;
     let cancelled = false;
-    let done = false;
-    let attempts = 0;
-    let retryTimer: number | null = null;
+    let running = false;
 
     const run = async () => {
-      let rows: RemoteMessageRow[];
+      if (cancelled || running) return;
+      running = true;
       try {
-        rows = await loadRecentIncoming(email);
+        const rows = await loadRecentAccount(email);
+        if (!cancelled && rows.length > 0) applySyncedRows(rows, email);
       } catch {
-        // Сеть пропала или схема ещё не применена. Пробуем ещё пару раз,
-        // а также сразу после восстановления соединения.
-        attempts += 1;
-        if (!cancelled && !done && attempts < 3) {
-          retryTimer = window.setTimeout(() => { void run(); }, 20000);
-        }
-        return;
-      }
-      done = true;
-      if (cancelled || rows.length === 0) return;
-
-      const groups = new Map<string, RemoteMessageRow[]>();
-      for (const row of [...rows].reverse()) {
-        const sender = normalizeEmail(row.sender_email);
-        if (!sender || sender === email) continue;
-        const group = row.payload.group;
-        const key = group ? `g:${group.key}` : `u:${sender}`;
-        const list = groups.get(key) ?? [];
-        list.push(row);
-        groups.set(key, list);
-      }
-
-      for (const senderRows of groups.values()) {
-        const last = senderRows[senderRows.length - 1];
-        const group = last.payload.group;
-        const sender = normalizeEmail(last.sender_email);
-        const chatId = group
-          ? openOrCreateGroup(group)
-          : openOrCreateChat({
-              name: last.sender_name || last.sender_username || sender,
-              username: last.sender_username,
-              email: sender,
-              avatar: last.sender_avatar,
-              remote: true,
-            });
-
-        commit((prev) => ({
-          ...prev,
-          chats: prev.chats.map((chat) => {
-            if (chat.id !== chatId) return chat;
-            const known = new Set(chat.messages.map((message) => message.id));
-            const additions = senderRows
-              .filter(
-                (row) =>
-                  !known.has(row.id) &&
-                  !(row.client_id ? known.has(row.client_id) : false),
-              )
-              .map<Message>((row) => ({
-                id: row.id,
-                chatId,
-                fromMe: false,
-                at: new Date(row.created_at).getTime(),
-                remoteId: row.id,
-                sender: row.sender_name || row.sender_username || normalizeEmail(row.sender_email),
-                senderAvatar: row.sender_avatar ?? null,
-                fresh: activeChatRef.current !== chatId,
-                ...row.payload,
-              }));
-            if (additions.length === 0) return chat;
-            const isOpen = activeChatRef.current === chatId;
-            return {
-              ...chat,
-              unread: isOpen ? 0 : chat.unread + additions.length,
-              messages: [...chat.messages, ...additions].sort((a, b) => a.at - b.at),
-            };
-          }),
-        }));
+        /* сеть вернётся — догоним на следующем проходе */
+      } finally {
+        running = false;
       }
     };
-    void run();
 
-    const onOnline = () => {
-      if (cancelled || done) return;
-      attempts = 0;
-      if (retryTimer) {
-        window.clearTimeout(retryTimer);
-        retryTimer = null;
-      }
-      void run();
+    void run();
+    const timer = window.setInterval(() => { void run(); }, 10_000);
+    const onOnline = () => { void run(); };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void run();
     };
     window.addEventListener("online", onOnline);
+    document.addEventListener("visibilitychange", onVisible);
 
     return () => {
       cancelled = true;
-      if (retryTimer) window.clearTimeout(retryTimer);
+      window.clearInterval(timer);
       window.removeEventListener("online", onOnline);
+      document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [state.user?.email, openOrCreateChat, openOrCreateGroup, commit]);
+  }, [state.user?.email, applySyncedRows]);
 
   const addCall = useCallback(
     (call: Omit<CallRecord, "id" | "at">) => {
@@ -1934,10 +2179,15 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       const key = accountKey(profile?.email || email);
       if (!key) return null;
 
-      // Локальная копия приоритетнее: в ней могут быть свежие правки профиля.
-      const account =
-        stateRef.current.accounts[key] ??
-        (profile ? userFromProfile({ ...profile, email: key }) : null);
+      // Данные профиля берём с сервера: удалённые баннер и музыка не должны
+      // возвращаться из локальной копии.
+      const local = stateRef.current.accounts[key];
+      const server = profile ? userFromProfile({ ...profile, email: key }) : null;
+      const account = local
+        ? server
+          ? { ...local, ...server, id: local.id, createdAt: local.createdAt }
+          : local
+        : server;
       if (!account) return null;
 
       commit((prev) => {

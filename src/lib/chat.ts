@@ -303,6 +303,46 @@ export async function loadRecentIncoming(
   return decrypted.filter((row) => !undecryptable(row.payload));
 }
 
+/** Последние сообщения аккаунта в обе стороны — для синхронизации устройств. */
+export async function loadRecentAccount(
+  meEmail: string,
+  limit = 120,
+): Promise<RemoteMessageRow[]> {
+  const email = normalizeEmail(meEmail);
+  if (!email) return [];
+  const fields =
+    "id,client_id,conversation,sender_email,recipient_email,sender_name,sender_username,sender_avatar,payload,read_at,created_at";
+
+  const [sent, received] = await Promise.all([
+    supabase
+      .from(MESSAGE_TABLE)
+      .select(fields)
+      .eq("sender_email", email)
+      .order("created_at", { ascending: false })
+      .limit(limit),
+    supabase
+      .from(MESSAGE_TABLE)
+      .select(fields)
+      .eq("recipient_email", email)
+      .order("created_at", { ascending: false })
+      .limit(limit),
+  ]);
+
+  if (sent.error) throw sent.error;
+  if (received.error) throw received.error;
+
+  const byId = new Map<string, RemoteMessageRow>();
+  for (const row of [...((sent.data ?? []) as RemoteMessageRow[]), ...((received.data ?? []) as RemoteMessageRow[])]) {
+    if (row.id) byId.set(row.id, row);
+  }
+
+  const rows = [...byId.values()].sort(
+    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+  );
+  const decrypted = await Promise.all(rows.map((row) => decryptRemoteRow(row, email)));
+  return decrypted.filter((row) => !undecryptable(row.payload));
+}
+
 /** Расшифровывает одно сообщение, пришедшее через Realtime. */
 export async function decryptRemoteRow(
   row: RemoteMessageRow,
@@ -537,6 +577,7 @@ export function subscribeToIncoming(
   onUpdate?: (row: RemoteMessageRow) => void,
   onPeerUpdate?: (row: RemoteMessageRow) => void,
   onDelete?: (row: Partial<RemoteMessageRow>) => void,
+  onOwnRow?: (row: RemoteMessageRow) => void,
 ) {
   const email = normalizeEmail(meEmail);
   const channelName = `zero-chat-${email.replace(/[^a-z0-9]/gi, "-")}`;
@@ -556,6 +597,22 @@ export function subscribeToIncoming(
         if (row?.id) onRow(row);
       },
     );
+
+  if (onOwnRow) {
+    channel = channel.on(
+      "postgres_changes",
+      {
+        event: "INSERT",
+        schema: "public",
+        table: MESSAGE_TABLE,
+        filter: `sender_email=eq.${email}`,
+      },
+      (event) => {
+        const row = event.new as RemoteMessageRow | null;
+        if (row?.id) onOwnRow(row);
+      },
+    );
+  }
 
   if (onUpdate) {
     channel = channel.on(

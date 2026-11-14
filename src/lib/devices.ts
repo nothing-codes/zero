@@ -116,6 +116,41 @@ export async function terminateOtherDevices(email: string): Promise<void> {
   if (error) throw error;
 }
 
+export function currentDeviceRowId(email: string) {
+  const account = normalizeEmail(email);
+  return account ? `${account}:${deviceId()}` : "";
+}
+
 export function isCurrentDevice(row: DeviceRow) {
-  return row.id === `${normalizeEmail(row.account_email)}:${deviceId()}`;
+  return row.id === currentDeviceRowId(row.account_email);
+}
+
+/** Устройство ещё не выкинуто из аккаунта. */
+export async function deviceStillActive(email: string): Promise<boolean> {
+  const id = currentDeviceRowId(email);
+  if (!id) return true;
+  const { data, error } = await supabase
+    .from(DEVICES_TABLE)
+    .select("id")
+    .eq("id", id)
+    .maybeSingle<{ id: string }>();
+  if (error) throw error;
+  return Boolean(data?.id);
+}
+
+/** Мгновенно узнаём, что этот сеанс завершили с другого устройства. */
+export function subscribeDeviceRevoked(email: string, onRevoked: () => void) {
+  const id = currentDeviceRowId(email);
+  if (!id) return null;
+  return supabase
+    .channel(`zero-device-${id.replace(/[^a-z0-9]/gi, "-")}`)
+    .on(
+      "postgres_changes",
+      { event: "DELETE", schema: "public", table: DEVICES_TABLE },
+      (event) => {
+        const old = event.old as { id?: string } | null;
+        if (old?.id === id) onRevoked();
+      },
+    )
+    .subscribe();
 }
