@@ -235,7 +235,7 @@ export function App() {
 
   if (!user) {
     return (
-      <Frame>
+      <Frame desktop={isDesktop}>
         <AuthFlow />
       </Frame>
     );

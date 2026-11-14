@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "type": "module",
   "main": "electron/main.cjs",
+  "author": "nothing.",
+  "description": "Zero",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -20,10 +22,17 @@
     },
     "files": [
       "electron/**/*",
+      "dist/**/*",
       "package.json"
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "electron/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
     }
   },
   "dependencies": {

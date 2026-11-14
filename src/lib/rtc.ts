@@ -6,8 +6,26 @@ import { supabase } from "./supabase";
  * Комната — это username того, кому звонят. Публичные STUN-серверы помогают
  * установить соединение напрямую; для сложных NAT нужен TURN (см. DEPLOY.md).
  */
+const DEFAULT_TURN: RTCIceServer[] = [
+  {
+    urls: [
+      "turn:openrelay.metered.ca:80",
+      "turn:openrelay.metered.ca:443",
+      "turns:openrelay.metered.ca:443?transport=tcp",
+    ],
+    username: "openrelayproject",
+    credential: "openrelayproject",
+  },
+];
+
 export const ICE_SERVERS: RTCIceServer[] = [
-  { urls: ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"] },
+  {
+    urls: [
+      "stun:stun.l.google.com:19302",
+      "stun:stun1.l.google.com:19302",
+      "stun:stun.cloudflare.com:3478",
+    ],
+  },
   ...(import.meta.env.VITE_TURN_URL
     ? [
         {
@@ -16,7 +34,7 @@ export const ICE_SERVERS: RTCIceServer[] = [
           credential: import.meta.env.VITE_TURN_CREDENTIAL,
         },
       ]
-    : []),
+    : DEFAULT_TURN),
 ];
 
 export function slug(value: string) {

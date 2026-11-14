@@ -162,6 +162,31 @@ export function CallOverlay({
       new Promise<void>((resolve) => window.setTimeout(resolve, timeout)),
     ]);
 
+  /**
+   * Ждём ICE-кандидатов и отправляем их внутри SDP. Собеседник подписывается
+   * на комнату уже после входящего звонка и иначе теряет часть кандидатов —
+   * звонок «висел» без соединения.
+   */
+  const waitForIce = (pc: RTCPeerConnection, timeout = 2600) =>
+    new Promise<void>((resolve) => {
+      if (pc.iceGatheringState === "complete") {
+        resolve();
+        return;
+      }
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        pc.removeEventListener("icegatheringstatechange", check);
+        resolve();
+      };
+      const check = () => {
+        if (pc.iceGatheringState === "complete") finish();
+      };
+      pc.addEventListener("icegatheringstatechange", check);
+      window.setTimeout(finish, timeout);
+    });
+
   const flushIce = async () => {
     const pc = pcRef.current;
     if (!pc) return;
@@ -223,6 +248,7 @@ export function CallOverlay({
       const pc = createPeer(stream);
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      await waitForIce(pc);
       if (ended.current) return;
       await waitReady();
       await sendSignal(channelRef.current, {
@@ -252,6 +278,7 @@ export function CallOverlay({
       await flushIce();
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
+      await waitForIce(pc);
       if (ended.current) return;
       await waitReady();
       await sendSignal(channelRef.current, {

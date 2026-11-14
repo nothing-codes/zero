@@ -248,6 +248,11 @@ export async function loadProfile(email: string): Promise<ZeroProfile | null> {
   return data ? normalizeProfileRow(data) : null;
 }
 
+/** Служебная заглушка, которая появляется, если ключ сообщения недоступен. */
+export function undecryptable(payload: MessagePayload): boolean {
+  return payload.kind === "text" && payload.text === "Зашифрованное сообщение";
+}
+
 /** Вся история диалога между двумя людьми, от старых к новым. */
 export async function loadConversation(
   meEmail: string,
@@ -267,7 +272,9 @@ export async function loadConversation(
 
   if (error) throw error;
   const rows = ((data ?? []) as RemoteMessageRow[]).reverse();
-  return Promise.all(rows.map((row) => decryptRemoteRow(row, meEmail)));
+  const decrypted = await Promise.all(rows.map((row) => decryptRemoteRow(row, meEmail)));
+  // Если ключ недоступен, не показываем служебную заглушку в переписке.
+  return decrypted.filter((row) => !undecryptable(row.payload));
 }
 
 /**
@@ -292,7 +299,8 @@ export async function loadRecentIncoming(
 
   if (error) throw error;
   const rows = (data ?? []) as RemoteMessageRow[];
-  return Promise.all(rows.map((row) => decryptRemoteRow(row, email)));
+  const decrypted = await Promise.all(rows.map((row) => decryptRemoteRow(row, email)));
+  return decrypted.filter((row) => !undecryptable(row.payload));
 }
 
 /** Расшифровывает одно сообщение, пришедшее через Realtime. */

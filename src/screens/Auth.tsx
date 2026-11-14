@@ -16,6 +16,7 @@ import { findRemoteAccount, isUsernameTaken } from "../lib/chat";
 import { playTone } from "../lib/feedback";
 import { useStore } from "../lib/store";
 import { supabase } from "../lib/supabase";
+import { useIsDesktop } from "../lib/useIsDesktop";
 import { cn, haptic } from "../lib/utils";
 
 const EASE = [0.16, 1, 0.3, 1] as const;
@@ -30,10 +31,12 @@ export function isValidEmail(value: string) {
 
 function EmailStep({
   email,
+  desktop = false,
   onEmail,
   onContinue,
 }: {
   email: string;
+  desktop?: boolean;
   onEmail: (value: string) => void;
   onContinue: () => void;
 }) {
@@ -63,8 +66,8 @@ function EmailStep({
   };
 
   return (
-    <div className="flex h-full flex-col px-6">
-      <div className="flex flex-1 flex-col justify-center pb-10 pt-[32vh]">
+    <div className={cn("flex h-full flex-col", desktop ? "px-0" : "px-6")}>
+      <div className={cn("flex flex-1 flex-col justify-center", desktop ? "pb-16 pt-0" : "pb-10 pt-[32vh]")}>
         <div className="mb-1.5">
           <p className="t-cap text-faint">Добро пожаловать</p>
           <h1 className="t-title mt-1">Ваш Gmail</h1>
@@ -101,9 +104,11 @@ function EmailStep({
           </div>
         </div>
 
-        <div className="mt-10">
-          <ContactGlobe className="mx-auto max-w-[260px]" />
-        </div>
+        {desktop ? null : (
+          <div className="mt-10">
+            <ContactGlobe className="mx-auto max-w-[260px]" />
+          </div>
+        )}
       </div>
 
       <Sheet
@@ -136,6 +141,7 @@ function OtpStep({
   sending,
   sendError,
   cooldownUntil,
+  desktop = false,
   onChangeEmail,
   onVerified,
   onVerify,
@@ -145,6 +151,7 @@ function OtpStep({
   sending: boolean;
   sendError: string | null;
   cooldownUntil: number;
+  desktop?: boolean;
   onChangeEmail: () => void;
   onVerified: () => void;
   onVerify: (value: string) => Promise<boolean>;
@@ -231,13 +238,18 @@ function OtpStep({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="px-6 pt-4">
+      <div className={cn(desktop ? "px-0 pt-4" : "px-6 pt-4")}>
         <IconButton label="Назад" onClick={onChangeEmail} className="-ml-2">
           <ArrowLeft size={19} />
         </IconButton>
       </div>
 
-      <div className="no-scrollbar flex min-h-0 flex-1 flex-col justify-center px-6 pb-12 pt-[10vh]">
+      <div
+        className={cn(
+          "no-scrollbar flex min-h-0 flex-1 flex-col justify-center",
+          desktop ? "px-0 pb-16 pt-0" : "px-6 pb-12 pt-[10vh]",
+        )}
+      >
         <div className="mb-8">
           <h1 className="t-title">Введите код</h1>
           <p className="t-body mt-2 break-all text-muted-foreground">
@@ -340,10 +352,12 @@ function OtpStep({
 
 function SignupStep({
   email,
+  desktop = false,
   onBack,
   onDone,
 }: {
   email: string;
+  desktop?: boolean;
   onBack: () => void;
   onDone: (profile: {
     name: string;
@@ -385,13 +399,18 @@ function SignupStep({
 
   return (
     <div className="flex h-full flex-col">
-      <div className="px-6 pt-4">
+      <div className={cn(desktop ? "px-0 pt-4" : "px-6 pt-4")}>
         <IconButton label="Назад" onClick={onBack} className="-ml-2">
           <ArrowLeft size={19} />
         </IconButton>
       </div>
 
-      <div className="no-scrollbar flex min-h-0 flex-1 flex-col justify-center px-6 pb-12">
+      <div
+        className={cn(
+          "no-scrollbar flex min-h-0 flex-1 flex-col justify-center",
+          desktop ? "px-0 pb-10" : "px-6 pb-12",
+        )}
+      >
         <div className="mb-6">
           <h1 className="t-title">Профиль</h1>
           <p className="t-sub mt-2 break-all text-faint">{email}</p>
@@ -454,7 +473,7 @@ function SignupStep({
         </div>
       </div>
 
-      <div className="px-6 pb-[max(22px,env(safe-area-inset-bottom,0px))] pt-3">
+      <div className={cn("pt-3", desktop ? "px-0 pb-4" : "px-6 pb-[max(22px,env(safe-area-inset-bottom,0px))]")}>
         <AnimatePresence>
           {error ? (
             <motion.p
@@ -510,6 +529,7 @@ function SignupStep({
 
 export function AuthFlow() {
   const { setOnboarded, loginExisting, completeSignup } = useStore();
+  const desktop = useIsDesktop();
   const [step, setStep] = useState<"email" | "otp" | "signup">("email");
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
@@ -651,80 +671,84 @@ export function AuthFlow() {
     void resolveAccount(address);
   };
 
-  return (
-    <div className="relative flex h-full flex-col overflow-hidden bg-background">
-      <AnimatePresence mode="wait" initial={false}>
-        {step === "email" ? (
-          <motion.div
-            key="email"
-            initial={{ opacity: 0, x: -18 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: -24 }}
-            transition={{ duration: 0.3, ease: EASE }}
-            className="h-full"
-          >
-            <EmailStep email={email} onEmail={setEmail} onContinue={startOtp} />
-          </motion.div>
-        ) : step === "otp" ? (
-          <motion.div
-            key="otp"
-            initial={{ opacity: 0, x: 28 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 28 }}
-            transition={{ duration: 0.3, ease: EASE }}
-            className="h-full"
-          >
-            <OtpStep
-              email={address}
-              sending={sending}
-              sendError={sendError}
-              cooldownUntil={cooldownUntil}
-              onChangeEmail={() => {
-                setStep("email");
-                setSendError(null);
-              }}
-              onVerified={finishOtp}
-              onVerify={verifyCode}
-              onResend={sendCode}
-            />
-          </motion.div>
-        ) : (
-          <motion.div
-            key="signup"
-            initial={{ opacity: 0, x: 28 }}
-            animate={{ opacity: 1, x: 0 }}
-            exit={{ opacity: 0, x: 28 }}
-            transition={{ duration: 0.3, ease: EASE }}
-            className="h-full"
-          >
-            <SignupStep
-              email={address}
-              onBack={() => setStep("email")}
-              onDone={async ({ name, username, bio, avatar }) => {
-                // @username — публичный ключ поиска, поэтому занятый
-                // обрабатываем до создания профиля.
-                try {
-                  if (await isUsernameTaken(username, address)) {
-                    return "Этот @username уже занят";
-                  }
-                } catch {
-                  return "Не удалось проверить @username. Попробуйте ещё раз.";
+  const content = (
+    <AnimatePresence mode="wait" initial={false}>
+      {step === "email" ? (
+        <motion.div
+          key="email"
+          initial={{ opacity: 0, x: -18 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={{ opacity: 0, x: -24 }}
+          transition={{ duration: 0.3, ease: EASE }}
+          className="h-full"
+        >
+          <EmailStep email={email} desktop={desktop} onEmail={setEmail} onContinue={startOtp} />
+        </motion.div>
+      ) : step === "otp" ? (
+        <motion.div
+          key="otp"
+          initial={{ opacity: 0, x: 28 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={{ opacity: 0, x: 28 }}
+          transition={{ duration: 0.3, ease: EASE }}
+          className="h-full"
+        >
+          <OtpStep
+            email={address}
+            sending={sending}
+            sendError={sendError}
+            cooldownUntil={cooldownUntil}
+            desktop={desktop}
+            onChangeEmail={() => {
+              setStep("email");
+              setSendError(null);
+            }}
+            onVerified={finishOtp}
+            onVerify={verifyCode}
+            onResend={sendCode}
+          />
+        </motion.div>
+      ) : (
+        <motion.div
+          key="signup"
+          initial={{ opacity: 0, x: 28 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={{ opacity: 0, x: 28 }}
+          transition={{ duration: 0.3, ease: EASE }}
+          className="h-full"
+        >
+          <SignupStep
+            email={address}
+            desktop={desktop}
+            onBack={() => setStep("email")}
+            onDone={async ({ name, username, bio, avatar }) => {
+              // @username — публичный ключ поиска, поэтому занятый
+              // обрабатываем до создания профиля.
+              try {
+                if (await isUsernameTaken(username, address)) {
+                  return "Этот @username уже занят";
                 }
-                completeSignup({
-                  email: address,
-                  name,
-                  username,
-                  avatar,
-                  bio,
-                });
-                playTone("success");
-                return null;
-              }}
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
+              } catch {
+                return "Не удалось проверить @username. Попробуйте ещё раз.";
+              }
+              completeSignup({
+                email: address,
+                name,
+                username,
+                avatar,
+                bio,
+              });
+              playTone("success");
+              return null;
+            }}
+          />
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
 
+  const notices = (
+    <>
       <AnimatePresence>
         {checking ? (
           <motion.div
@@ -770,6 +794,33 @@ export function AuthFlow() {
           </div>
         </div>
       ) : null}
+    </>
+  );
+
+  if (desktop) {
+    return (
+      <div className="relative flex h-full min-h-0 w-full overflow-hidden bg-background">
+        <aside className="relative flex w-[44%] min-w-[380px] max-w-[640px] items-center justify-center border-r border-foreground/8 bg-surface/50 px-10 py-10">
+          <img src="/logo.png" alt="Zero" className="absolute left-10 top-10 h-9 w-auto object-contain" />
+          <div className="w-full max-w-[380px]">
+            <ContactGlobe className="w-full" />
+          </div>
+        </aside>
+
+        <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+          <div className="relative mx-auto flex h-full min-h-0 w-full max-w-[440px] flex-col px-10">
+            {content}
+          </div>
+          {notices}
+        </main>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative flex h-full flex-col overflow-hidden bg-background">
+      {content}
+      {notices}
     </div>
   );
 }

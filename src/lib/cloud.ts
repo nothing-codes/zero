@@ -1,5 +1,5 @@
 import type { AppState } from "../types";
-import { decryptState, encryptState, isEncryptedState } from "./e2ee";
+import { decryptState, encryptState, identityBackup, isEncryptedState, type EncryptedState } from "./e2ee";
 import { supabase } from "./supabase";
 
 /**
@@ -15,7 +15,10 @@ import { supabase } from "./supabase";
  */
 export const CLOUD_TABLE = "zero_states";
 
-export type CloudState = Pick<AppState, "version" | "user" | "chats" | "calls" | "settings">;
+export type CloudState = Pick<AppState, "version" | "user" | "chats" | "calls" | "settings"> & {
+  /** Приватный ключ шифрования — нужен для входа с другого устройства. */
+  identity?: EncryptedState | null;
+};
 
 export interface CloudSnapshot extends CloudState {
   updated_at?: string;
@@ -29,12 +32,14 @@ export async function saveCloudState(email: string, state: AppState): Promise<vo
   const key = accountKey(email);
   if (!key || !state.user) return;
 
+  const identity = await identityBackup(key).catch(() => null);
   const payload: CloudState = {
     version: state.version,
     user: state.user,
     chats: state.chats,
     calls: state.calls,
     settings: state.settings,
+    ...(identity ? { identity } : {}),
   };
 
   const encrypted = await encryptState(payload, key);

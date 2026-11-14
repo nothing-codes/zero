@@ -11,6 +11,7 @@ import { supabase } from "./supabase";
  */
 
 const IDENTITY_PREFIX = "zero:e2ee:identity:v1:";
+const LEGACY_PREFIX = "zero:e2ee:legacy:v1:";
 const BACKUP_PREFIX = "zero:e2ee:backup:v1:";
 const E2EE_INFO = "zero-e2ee-v1";
 const PAYLOAD_MARK = "zero-e2ee-v1";
@@ -108,7 +109,53 @@ async function importIdentity(stored: StoredIdentity): Promise<Identity> {
   return { privateKey, publicJwk: stored.publicJwk };
 }
 
-/** Ключевая пара устройства. Приватный ключ никогда не покидает браузер. */
+function readStoredIdentity(email: string): StoredIdentity | null {
+  try {
+    const raw = localStorage.getItem(`${IDENTITY_PREFIX}${email}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as StoredIdentity;
+    return parsed?.privateJwk && parsed?.publicJwk ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveStoredIdentity(email: string, stored: StoredIdentity) {
+  try {
+    localStorage.setItem(`${IDENTITY_PREFIX}${email}`, JSON.stringify(stored));
+  } catch {
+    /* приватный ключ останется только в памяти этой сессии */
+  }
+}
+
+function readLegacyIdentities(email: string): StoredIdentity[] {
+  try {
+    const raw = localStorage.getItem(`${LEGACY_PREFIX}${email}`);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as StoredIdentity[];
+    return Array.isArray(parsed) ? parsed.filter((item) => item?.privateJwk && item?.publicJwk) : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberLegacyIdentity(email: string, stored: StoredIdentity) {
+  const list = readLegacyIdentities(email);
+  if (list.some((item) => item.publicJwk?.x === stored.publicJwk?.x && item.publicJwk?.y === stored.publicJwk?.y)) {
+    return;
+  }
+  try {
+    localStorage.setItem(`${LEGACY_PREFIX}${email}`, JSON.stringify([stored, ...list].slice(0, 6)));
+  } catch {
+    /* noop */
+  }
+}
+
+/**
+ * Ключевая пара аккаунта. Приватный ключ синхронизируется через резервную
+ * копию: на новом устройстве берётся тот же ключ, поэтому история
+ * расшифровывается, а переписка продолжается без «Зашифрованного сообщения».
+ */
 export function ensureIdentity(emailValue: string): Promise<Identity> {
   const email = normalizeEmail(emailValue);
   if (!email) return Promise.reject(new Error("missing-email"));
@@ -116,35 +163,28 @@ export function ensureIdentity(emailValue: string): Promise<Identity> {
   if (cached) return cached;
 
   const created = (async () => {
-    let stored: StoredIdentity | null = null;
-    try {
-      const raw = localStorage.getItem(`${IDENTITY_PREFIX}${email}`);
-      if (raw) {
-        const parsed = JSON.parse(raw) as StoredIdentity;
-        if (parsed?.privateJwk && parsed?.publicJwk) stored = parsed;
+    let stored = readStoredIdentity(email);
+
+    const cloud = await fetchCloudIdentity(email);
+    if (cloud) {
+      const same = stored?.publicJwk?.x === cloud.publicJwk.x && stored?.publicJwk?.y === cloud.publicJwk.y;
+      if (!same) {
+        if (stored) rememberLegacyIdentity(email, stored);
+        stored = cloud;
+        saveStoredIdentity(email, stored);
       }
-    } catch {
-      stored = null;
     }
 
     if (!stored) {
       stored = await createIdentity();
-      try {
-        localStorage.setItem(`${IDENTITY_PREFIX}${email}`, JSON.stringify(stored));
-      } catch {
-        /* приватный ключ останется только в памяти этой сессии */
-      }
+      saveStoredIdentity(email, stored);
     }
 
     try {
       return await importIdentity(stored);
     } catch {
       const fresh = await createIdentity();
-      try {
-        localStorage.setItem(`${IDENTITY_PREFIX}${email}`, JSON.stringify(fresh));
-      } catch {
-        /* noop */
-      }
+      saveStoredIdentity(email, fresh);
       return importIdentity(fresh);
     }
   })();
@@ -192,12 +232,15 @@ function fingerprint(jwk: JsonWebKey) {
   return `${jwk.kty}:${jwk.crv}:${jwk.x}:${jwk.y}`;
 }
 
-async function deriveConversationKey(meEmail: string, peerEmail: string): Promise<CryptoKey> {
-  const me = await ensureIdentity(meEmail);
+async function deriveConversationKeyFor(
+  me: Identity,
+  meEmail: string,
+  peerEmail: string,
+): Promise<CryptoKey> {
   const peer = await fetchPeerKey(peerEmail);
   if (!peer) throw new Error("missing-peer-key");
 
-  const cacheKey = `${normalizeEmail(meEmail)}|${normalizeEmail(peerEmail)}|${fingerprint(peer)}`;
+  const cacheKey = `${normalizeEmail(meEmail)}|${normalizeEmail(peerEmail)}|${fingerprint(me.publicJwk)}|${fingerprint(peer)}`;
   const cached = conversationKeys.get(cacheKey);
   if (cached) return cached;
 
@@ -232,6 +275,11 @@ async function deriveConversationKey(meEmail: string, peerEmail: string): Promis
   conversationKeys.set(cacheKey, created);
   created.catch(() => conversationKeys.delete(cacheKey));
   return created;
+}
+
+async function deriveConversationKey(meEmail: string, peerEmail: string): Promise<CryptoKey> {
+  const me = await ensureIdentity(meEmail);
+  return deriveConversationKeyFor(me, meEmail, peerEmail);
 }
 
 export function isEncryptedPayload(value: unknown): value is EncryptedEnvelope {
@@ -289,6 +337,23 @@ export async function decryptPayload(
     );
     return JSON.parse(new TextDecoder().decode(plain)) as MessagePayload;
   } catch {
+    // Сообщения, зашифрованные до синхронизации ключа, читаем прежним
+    // ключом этого устройства — так после входа с ПК не остаётся заглушек.
+    const email = normalizeEmail(meEmail);
+    for (const stored of readLegacyIdentities(email)) {
+      try {
+        const identity = await importIdentity(stored);
+        const key = await deriveConversationKeyFor(identity, meEmail, peerEmail);
+        const plain = await subtle().decrypt(
+          { name: "AES-GCM", iv: bytes(base64ToBytes(payload.iv)) },
+          key,
+          bytes(base64ToBytes(payload.data)),
+        );
+        return JSON.parse(new TextDecoder().decode(plain)) as MessagePayload;
+      } catch {
+        /* пробуем следующий сохранённый ключ */
+      }
+    }
     return { kind: "text", text: "Зашифрованное сообщение" };
   }
 }
@@ -350,18 +415,24 @@ export function decryptedMediaUrl(src: string, enc: MediaEncryption): Promise<st
 
 /* ── Резервная копия состояния ───────────────────────────────────── */
 
+/** Ключ резервной копии выводится из email — одно и то же на всех устройствах. */
 async function backupKey(email: string): Promise<CryptoKey> {
   const normalized = normalizeEmail(email);
-  const storageKey = `${BACKUP_PREFIX}${normalized}`;
-  let raw: Uint8Array;
+  const digest = await subtle().digest(
+    "SHA-256",
+    bytes(encode(`zero-backup-v1:${normalized}`)),
+  );
+  return subtle().importKey("raw", digest, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+
+async function legacyBackupKey(email: string): Promise<CryptoKey | null> {
   try {
-    const stored = localStorage.getItem(storageKey);
-    raw = stored ? base64ToBytes(stored) : randomBytes(32);
-    if (!stored) localStorage.setItem(storageKey, bytesToBase64(raw));
+    const stored = localStorage.getItem(`${BACKUP_PREFIX}${normalizeEmail(email)}`);
+    if (!stored) return null;
+    return subtle().importKey("raw", bytes(base64ToBytes(stored)), "AES-GCM", false, ["encrypt", "decrypt"]);
   } catch {
-    raw = randomBytes(32);
+    return null;
   }
-  return subtle().importKey("raw", bytes(raw), "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 
 export interface EncryptedState {
@@ -392,11 +463,57 @@ export function isEncryptedState(value: unknown): value is EncryptedState {
 }
 
 export async function decryptState<T>(value: EncryptedState, email: string): Promise<T> {
-  const key = await backupKey(email);
-  const plain = await subtle().decrypt(
-    { name: "AES-GCM", iv: bytes(base64ToBytes(value.iv)) },
-    key,
-    bytes(base64ToBytes(value.data)),
-  );
-  return JSON.parse(new TextDecoder().decode(plain)) as T;
+  const decrypt = async (key: CryptoKey) => {
+    const plain = await subtle().decrypt(
+      { name: "AES-GCM", iv: bytes(base64ToBytes(value.iv)) },
+      key,
+      bytes(base64ToBytes(value.data)),
+    );
+    return JSON.parse(new TextDecoder().decode(plain)) as T;
+  };
+
+  try {
+    return await decrypt(await backupKey(email));
+  } catch {
+    // Копии, сохранённые старым устройством со случайным ключом.
+    const legacy = await legacyBackupKey(email);
+    if (!legacy) throw new Error("backup-key-mismatch");
+    return decrypt(legacy);
+  }
+}
+
+/** Копия приватного ключа для облака — чтобы новое устройство читало историю. */
+export async function identityBackup(emailValue: string): Promise<EncryptedState | null> {
+  const email = normalizeEmail(emailValue);
+  if (!email) return null;
+  let stored = readStoredIdentity(email);
+  if (!stored) {
+    await ensureIdentity(email).catch(() => null);
+    stored = readStoredIdentity(email);
+  }
+  return stored ? encryptState(stored, email) : null;
+}
+
+/** Достаём ключ аккаунта из резервной копии в Supabase. */
+async function fetchCloudIdentity(email: string): Promise<StoredIdentity | null> {
+  try {
+    const { data, error } = await supabase
+      .from("zero_states")
+      .select("state")
+      .eq("phone", email)
+      .maybeSingle<{ state: unknown }>();
+    if (error || !data?.state) return null;
+
+    let snapshot: unknown = data.state;
+    if (isEncryptedState(snapshot)) {
+      snapshot = await decryptState<Record<string, unknown>>(snapshot, email);
+    }
+
+    const backup = (snapshot as { identity?: unknown } | null)?.identity;
+    if (!isEncryptedState(backup)) return null;
+    const stored = await decryptState<StoredIdentity>(backup, email);
+    return stored?.privateJwk && stored?.publicJwk ? stored : null;
+  } catch {
+    return null;
+  }
 }

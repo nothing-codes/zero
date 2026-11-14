@@ -42,6 +42,7 @@ import {
   normalizeUsername,
   sendRemoteMessage,
   subscribeToIncoming,
+  undecryptable,
   upsertProfile,
   type RemoteMessageRow,
   type ZeroProfile,
@@ -400,9 +401,14 @@ export function StoreProvider({ children }: { children: ReactNode }) {
               (chat.remote || chat.group || chat.messages.length > 3),
           );
           if (hasRealHistory) return prev;
+          // На новом устройстве локально только стандартные чаты — облачную
+          // копию принимаем целиком, даже если сообщений в ней пока немного.
+          const freshDevice = prev.chats.every(
+            (chat) => chat.id === "c_saved" || chat.id === "c_zero",
+          );
           const localMessages = prev.chats.reduce((sum, chat) => sum + chat.messages.length, 0);
           const remoteMessages = remote.chats.reduce((sum, chat) => sum + chat.messages.length, 0);
-          if (remoteMessages <= localMessages) return prev;
+          if (!freshDevice && remoteMessages <= localMessages) return prev;
           return {
             ...prev,
             chats: withSavedChat(cleanChats(remote.chats)),
@@ -1664,6 +1670,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       email,
       (row) => {
         void decryptRemoteRow(row, email).then((decrypted) => {
+          if (undecryptable(decrypted.payload)) return;
           const senderEmail = normalizeEmail(decrypted.sender_email);
           if (senderEmail === email) return;
           const senderUsername = normalizeUsername(decrypted.sender_username);
@@ -1710,6 +1717,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         const peerEmail = normalizeEmail(row.sender_email);
         if (peerEmail === email) return;
         void decryptRemoteRow(row, email).then((decrypted) => {
+          if (undecryptable(decrypted.payload)) return;
           commit((prev) => ({
             ...prev,
             chats: prev.chats.map((chat) => {
